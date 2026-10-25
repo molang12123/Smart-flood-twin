@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "grid_id": "synthetic-undulating-6x5",
+  "terrain_id": "synthetic-undulating",
+  "terrain_version": "1",
+  "synthetic": true,
+  "crs": "LOCAL_ENGINEERING",
+  "crs_type": "engineering",
+  "surface_type": "synthetic",
+  "axis_order": "x_east_y_north",
+  "horizontal_unit": "m",
+  "vertical_unit": "m",
+  "vertical_datum": "synthetic_local_zero",
+  "x_edge_origin": 0.0,
+  "y_edge_origin": 0.0,
+  "dx": 20.0,
+  "dy": 20.0,
+  "nx": 6,
+  "ny": 5,
+  "extent": [
+    0.0,
+    120.0,
+    0.0,
+    100.0
+  ],
+  "row_order": "south_to_north",
+  "nodata_policy": "reject",
+  "domain_type": "rectangle",
+  "assumptions": [
+    "Synthetic test fixture, not Minxiong terrain",
+    "Uniform Manning n=0.02"
+  ],
+  "sha256": "03d1a6fed0e6ed15022ae6890c0b17d036dfbc964de0801570845c0052483607",
+  "roughness_sha256": "190c875378354f93ff6c264b75b2c953a94a661ec3c79095e57f6f3658a5207a"
+}

@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "grid_id": "synthetic-flat-6x5",
+  "terrain_id": "synthetic-flat",
+  "terrain_version": "1",
+  "synthetic": true,
+  "crs": "LOCAL_ENGINEERING",
+  "crs_type": "engineering",
+  "surface_type": "synthetic",
+  "axis_order": "x_east_y_north",
+  "horizontal_unit": "m",
+  "vertical_unit": "m",
+  "vertical_datum": "synthetic_local_zero",
+  "x_edge_origin": 0.0,
+  "y_edge_origin": 0.0,
+  "dx": 20.0,
+  "dy": 20.0,
+  "nx": 6,
+  "ny": 5,
+  "extent": [
+    0.0,
+    120.0,
+    0.0,
+    100.0
+  ],
+  "row_order": "south_to_north",
+  "nodata_policy": "reject",
+  "domain_type": "rectangle",
+  "assumptions": [
+    "Synthetic test fixture, not Minxiong terrain",
+    "Uniform Manning n=0.02"
+  ],
+  "sha256": "5d305fa064c2bfe3578bbcb5fdf5a7603d2e3ccc52a7c17857ef9357e15b478b",
+  "roughness_sha256": "190c875378354f93ff6c264b75b2c953a94a661ec3c79095e57f6f3658a5207a"
+}

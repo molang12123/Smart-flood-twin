@@ -1,0 +1,10 @@
+{
+  "depth_rmse_m_max": 0.00001,
+  "depth_mae_m_max": 0.00001,
+  "velocity_rmse_m_s_max": 0.0001,
+  "ic_h_rmse_m_max": 0.000001,
+  "bc_discharge_rmse_m2_s_max": 0.0000001,
+  "pde_rms_normalized_max": 0.05,
+  "max_global_balance_error_m3": 0.007,
+  "max_cell_balance_error_m3": 0.0003
+}

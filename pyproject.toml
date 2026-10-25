@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-flood-pinn"
+version = "0.2.0"
+description = "Fixed-terrain parametric shallow-water PINN research workflow"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24,<3", "torch>=2.6,<3", "matplotlib>=3.7,<4"]
+
+[project.optional-dependencies]
+crs = ["pyproj>=3.6,<4"]
+
+[project.scripts]
+flood-pinn = "flood_pinn.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["flood_pinn*"]

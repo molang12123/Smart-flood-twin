@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "terrain": {
+    "csv": "../data/examples/flat/terrain.csv",
+    "metadata": "../data/examples/flat/terrain_metadata.json",
+    "roughness": "../data/examples/flat/roughness.csv"
+  },
+  "conditions": {
+    "initial": "dry",
+    "boundaries": {
+      "west": "wall",
+      "east": "wall",
+      "south": "wall",
+      "north": "wall"
+    }
+  },
+  "time": {
+    "end_s": 6,
+    "output_interval_s": 2
+  },
+  "scales": {
+    "x_origin": 0.0,
+    "y_origin": 0.0,
+    "x_scale": 120.0,
+    "y_scale": 100.0,
+    "t_scale": 6.0,
+    "r_scale": 2.2222222222222223e-05,
+    "duration_scale": 6.0,
+    "h_scale": 0.0001,
+    "u_scale": 0.001
+  },
+  "model": {
+    "width": 16,
+    "layers": 2,
+    "parameterized": false
+  },
+  "scenarios": [
+    {
+      "scenario_id": "train_0",
+      "rainfall_mm_hr": 20,
+      "duration_s": 2,
+      "split": "train"
+    }
+  ],
+  "training": {
+    "adam_steps": 50,
+    "lbfgs_steps": 5,
+    "interior_points": 24,
+    "ic_points": 16,
+    "bc_points": 4,
+    "learning_rate": 0.003,
+    "seed": 42,
+    "max_seconds": 60,
+    "threads": 1,
+    "scenarios_per_batch": 4
+  },
+  "thresholds": {
+    "dry_depth_m": 1e-05,
+    "flood_depth_m": 5e-05
+  },
+  "reference_csv": "../data/examples/flat/reference_single.csv",
+  "reference_provenance": {
+    "source_type": "analytic_flat_closed_uniform_rain",
+    "synthetic": true,
+    "description": "h=R*min(t,T_rain), u=v=0; only valid on flat closed terrain; not Minxiong observations"
+  }
+}

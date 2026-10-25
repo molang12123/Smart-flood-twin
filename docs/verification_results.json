@@ -1,0 +1,66 @@
+{
+  "tests": {
+    "executed": 77,
+    "passed": 77,
+    "skipped": 0
+  },
+  "training": {
+    "training_completed": true,
+    "converged": false,
+    "elapsed_training_s": 2.8782836190002854,
+    "adam_steps_completed": 100,
+    "lbfgs_iterations_completed": 4,
+    "closure_evaluations": 6
+  },
+  "prediction": {
+    "status": "complete",
+    "validation_status": "research_unvalidated",
+    "num_cells": 30,
+    "num_frames": 5,
+    "num_faces": 71,
+    "max_global_balance_error_m3": 0.5252462711419703,
+    "max_cell_balance_error_m3": 0.011227544165777297
+  },
+  "test_scenario": {
+    "scenario_id": "test",
+    "split": "test",
+    "pde_rms_normalized": [
+      0.6318290980634234,
+      0.006026422869652391,
+      0.006046052058099447
+    ],
+    "pde_p95_normalized": [
+      0.8317992330114653,
+      0.010384971639973536,
+      0.00930460023254253
+    ],
+    "ic_h_rmse_m": 1.3011541341256816e-05,
+    "ic_velocity_rmse_m_s": 8.341641660081223e-06,
+    "bc_normal_velocity_rmse_m_s": 1.2121744878147229e-05,
+    "bc_discharge_rmse_m2_s": 2.9697995401952995e-10,
+    "reference_sample_count": 35,
+    "depth_mae_m": 1.6142288612872583e-05,
+    "depth_rmse_m": 1.8448206183722738e-05,
+    "relative_l2": 0.41108950632556474,
+    "velocity_rmse_m_s": 1.011328276945278e-05,
+    "flood_iou": 0.05,
+    "flood_precision": 1.0,
+    "flood_recall": 0.05,
+    "flood_f1": 0.09523809523809523,
+    "reference_status": "comparison_completed"
+  },
+  "benchmark": {
+    "device": "cpu",
+    "load_seconds": 0.005610200000774057,
+    "inference_export_seconds": 1.6742699480000738,
+    "peak_process_rss_kib": 287884,
+    "rss_scope": "whole process including loading and plotting, Linux KiB",
+    "cells": 30,
+    "frames": 5,
+    "batch_size": 4096,
+    "includes_exchange_and_export": true
+  },
+  "assessment_status": "failed",
+  "manifest_verified": true,
+  "real_minxiong_validation": "not_completed"
+}
