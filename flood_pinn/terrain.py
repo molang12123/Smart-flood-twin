@@ -114,7 +114,7 @@ class TerrainGrid:
     @classmethod
     def from_files(cls, csv_path, metadata_path, roughness_path=None, manning_n=None):
         csv_path, metadata_path = Path(csv_path), Path(metadata_path)
-        metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
+        metadata = json.loads(metadata_path.read_text(encoding='utf-8-sig'))
         expected = metadata.get('sha256')
         actual = hashlib.sha256(csv_path.read_bytes()).hexdigest()
         if expected is not None and expected != actual:

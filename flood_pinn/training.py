@@ -132,7 +132,7 @@ def _read_reference(config, terrain):
         if not provenance.get("source_type") or not provenance.get("source_version") or provenance.get("synthetic") is not False:
             raise ValueError("real-terrain reference requires source_type, source_version and synthetic=false")
     path = Path(path)
-    with path.open(newline="", encoding="utf-8") as stream:
+    with path.open(newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
         if not {"scenario_id", "x", "y", "t", "h"}.issubset(reader.fieldnames or []):
             raise ValueError("reference requires scenario_id,x,y,t,h")

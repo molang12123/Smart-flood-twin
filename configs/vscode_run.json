@@ -1,0 +1,11 @@
+{
+  "action": "train_and_predict",
+  "base_config": "fixed_terrain.json",
+  "rainfall_mm_hr": 60,
+  "duration": {"value": 0.05, "unit": "min"},
+  "output_root": "../outputs/vscode",
+  "model_dir": null,
+  "allow_unvalidated": true,
+  "batch_size": 4096,
+  "open_report": true
+}

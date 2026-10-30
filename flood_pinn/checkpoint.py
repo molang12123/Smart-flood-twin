@@ -80,7 +80,7 @@ def save_checkpoint(model, terrain, config, out_dir, report, validated_domain=No
 def load_checkpoint(folder, terrain, *, conditions=None, device="cpu"):
     folder = Path(folder)
     try:
-        metadata = json.loads((folder / "model_metadata.json").read_text())
+        metadata = json.loads((folder / "model_metadata.json").read_text(encoding="utf-8-sig"))
         if not isinstance(metadata, dict):
             raise ValueError("Checkpoint metadata must be a JSON object")
         integrity = {k: v for k, v in metadata.items() if k != "metadata_sha256"}

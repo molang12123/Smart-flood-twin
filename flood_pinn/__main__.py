@@ -2,18 +2,18 @@
 import argparse
 import csv
 import json
-import os
 from pathlib import Path
 import sys
 import time
 
 from .contracts import PredictionError, write_json
+from .platform_info import prepare_runtime_cache, process_memory_info
 from .terrain import TerrainGrid
 
 
 def load_config(path):
     path = Path(path).resolve()
-    config = json.loads(path.read_text())
+    config = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(config, dict) or not isinstance(config.get("terrain"), dict):
         raise ValueError("Config and its terrain entry must be JSON objects")
     terrain = config["terrain"]
@@ -52,15 +52,13 @@ def main(argv=None):
     assessment.add_argument("--standards", required=True)
     assessment.add_argument("--output", required=True)
     args = parser.parse_args(argv)
-    # Writable non-secret cache, no matplotlib attempt to write into read-only HOME.
-    os.environ.setdefault("MPLCONFIGDIR", "/tmp/flood-pinn-matplotlib")
-    os.environ.setdefault("XDG_CACHE_HOME", "/tmp/flood-pinn-cache")
     try:
+        prepare_runtime_cache()
         if args.command == "assess":
             from .assessment import assess
-            assessment = assess(json.loads(Path(args.metrics).read_text()),
-                                json.loads(Path(args.simulation).read_text()),
-                                json.loads(Path(args.standards).read_text()))
+            assessment = assess(json.loads(Path(args.metrics).read_text(encoding="utf-8-sig")),
+                                json.loads(Path(args.simulation).read_text(encoding="utf-8-sig")),
+                                json.loads(Path(args.standards).read_text(encoding="utf-8-sig")))
             path = Path(args.output)
             if path.exists():
                 raise FileExistsError("Existing assessment is preserved; select a new output file")
@@ -101,12 +99,10 @@ def main(argv=None):
             for _ in result.frames_iterator:
                 pass
             summary = result.finalize()
-            import resource
             write_json(Path(args.output) / "benchmark_report.json", {
                 "device": str(next(predictor.model.parameters()).device), "load_seconds": load_seconds,
                 "inference_export_seconds": time.perf_counter()-start-load_seconds,
-                "peak_process_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
-                "rss_scope": "whole process including loading and plotting, Linux KiB",
+                **process_memory_info(),
                 "cells": grid.nx*grid.ny, "frames": len(result.actual_output_times_s),
                 "batch_size": args.batch_size, "includes_exchange_and_export": True})
             from .export import refresh_manifest

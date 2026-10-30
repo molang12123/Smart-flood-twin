@@ -34,12 +34,8 @@ def _writer(stack, path, names):
 
 
 def _plotting():
-    # Cloud tasks may have a read-only home; keep only plotting caches in /tmp.
-    base=Path(tempfile.gettempdir())/f'flood-pinn-plot-cache-{os.getuid()}'
-    for variable,subdirectory in [('MPLCONFIGDIR','matplotlib'),('XDG_CACHE_HOME','xdg')]:
-        if variable not in os.environ:
-            path=base/subdirectory;path.mkdir(parents=True,exist_ok=True)
-            os.environ[variable]=str(path)
+    from .platform_info import prepare_runtime_cache
+    prepare_runtime_cache()
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt

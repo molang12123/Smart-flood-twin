@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "PINN：固定地形、手动雨情与训练报告",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/run_in_vscode.py",
+      "args": ["--settings", "${workspaceFolder}/configs/vscode_run.json"],
+      "cwd": "${workspaceFolder}",
+      "console": "internalConsole",
+      "justMyCode": true
+    }
+  ]
+}

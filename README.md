@@ -4,6 +4,24 @@
 
 **当前是可运行的研究原型，不是已验证的民雄预测模型。** 合成小案例的读入→训练→保存→新进程推理→时序/流量/水量导出已运行；短训练的误差和水量门槛尚未通过，默认生产推理会拒绝无验证证据的模型。真实 DEM、粗糙度/初边界、可信参考、雨情范围和精度/性能预算仍待团队提供。
 
+## 在 VS Code 中运行（Windows 也适用）
+
+1. 用 VS Code 的“打开文件夹”打开整个仓库，安装推荐的 **Python** 和 **Python Debugger** 扩展。
+2. 首次使用按 `Ctrl+Shift+P`，选 **Python: Create Environment → Venv → Python 3.12 → requirements.txt**。已有`.venv`则使用 **Python: Select Interpreter** 选择它。这一步由VS Code安装依赖，不需要手动在Windows终端输入运行命令。
+3. 打开`configs/vscode_run.json`，手动编辑`rainfall_mm_hr`和`duration`（unit支持`s`/`min`/`h`）。当前固定地形由`configs/fixed_terrain.json`中的CSV路径指定，每次读取同一文件，不随机生成。
+4. 按 **F5**，选择 **PINN：固定地形、手动雨情与训练报告**。日志在VS Code“调试控制台”显示，结束后打开HTML报告；也可在`outputs/vscode/<本次运行>/training_results_report.html`找到它。
+
+```json
+"rainfall_mm_hr": 60,
+"duration": {"value": 0.05, "unit": "min"}
+```
+
+示例是60mm/hr、降雨3秒、总模拟6秒的短流程测试，不能当作实际暴雨设定。固定起伏CSV是人工示例，并非民雄DEM。随机的是训练采样点，不是地形。训练用的多雨情列表在`fixed_terrain.json`中明确列出；上面的手填雨情用于本次预测，不会静默改写训练情境或外推范围。
+
+`action`可选`train_and_predict`、`train`、`predict`。首次用默认训练+预测；之后仅改雨势时改成`predict`，将`model_dir`填为上次`training/model`的路径，避免重复训练。超出模型训练/验证范围的雨势会报错，需要先定义新范围并重新训练。详细图形操作、文件设置及报告说明见[VS Code使用指南](docs/VSCODE_GUIDE.md)。
+
+报告同时提供自包含HTML和Markdown，汇总固定地形/指纹、手动雨情、迭代/Loss、PDE/IC/BC、参考误差（若有）、水量、图表和异常。训练完成与模型验收分开列出，无参考时明确“尚未完成外部验证”。Windows兼容分支有单元测试，本实例的实际运行验证仍在Linux，未声称已在原生Windows上实测。
+
 ## 安装与检查
 
 以下在仓库根目录执行；Python 3.12/Linux CPU 环境已验证，CUDA需另按官方平台要求安装并验证。
