@@ -13,7 +13,8 @@ def load_model(path, terrain):
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if checkpoint["terrain_fingerprint"] != terrain.fingerprint:
         raise ValueError("checkpoint terrain fingerprint does not match this DEM/Manning setting")
-    model = ConditionalFloodPINN(checkpoint["scales"], checkpoint["width"], checkpoint["layers"])
+    model = ConditionalFloodPINN(checkpoint["scales"], checkpoint["width"], checkpoint["layers"],
+                                 checkpoint.get("log_conditions", False))
     model.load_state_dict(checkpoint["model_state"]); model.eval()
     return model, checkpoint
 

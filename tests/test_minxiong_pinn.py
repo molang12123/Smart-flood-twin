@@ -10,11 +10,36 @@ import torch
 
 from minxiong_pinn.model import ConditionalFloodPINN
 from flood_pinn.physics import residuals
-from minxiong_pinn.rainfall import extract_events
+from minxiong_pinn.rainfall import add_design_events, extract_events
 from minxiong_pinn.terrain import MaskedRasterTerrain
 
 
 class MinxiongPINNTests(unittest.TestCase):
+    def test_log_conditioning_resolves_full_rainfall_range(self):
+        scales = {"x0": 0., "y0": 0., "lx": 1., "ly": 1., "time_s": 1.,
+                  "rain_m_s": 700 / 3_600_000., "rain_min_m_s": .5 / 3_600_000.,
+                  "duration_s": 37 * 3600., "duration_min_s": 3600.,
+                  "depth_m": 26., "velocity_m_s": 20., "ramp_s": 60.}
+        model = ConditionalFloodPINN(scales, width=4, layers=1, log_conditions=True)
+        captured = []
+        handle = model.net[0].register_forward_pre_hook(lambda module, args: captured.append(args[0].detach()))
+        points = torch.tensor([[0., 0., 1., .5 / 3_600_000., 3600.],
+                               [0., 0., 1., 700 / 3_600_000., 37 * 3600.]], dtype=torch.float64)
+        model(points); handle.remove()
+        torch.testing.assert_close(captured[0][:, 3:5], torch.tensor([[0., 0.], [1., 1.]]), atol=1e-6, rtol=0)
+
+    def test_design_grid_trains_domain_edges_and_holds_out_interior(self):
+        rates = [.5, 1., 2., 5., 10., 20., 50., 100., 200., 350., 500., 700.]
+        durations = [1., 2., 3., 6., 12., 18., 24., 30., 37.]
+        events = add_design_events([], rates, durations)
+        self.assertEqual(len(events), len(rates) * len(durations))
+        edges = [event for event in events if event["mean_intensity_mm_hr"] in {.5, 700.}
+                 or event["hours"] in {1., 37.}]
+        self.assertTrue(all(event["split"] == "train" for event in edges))
+        self.assertTrue(any(event["split"] == "validation" for event in events))
+        self.assertTrue(any(event["split"] == "test" for event in events))
+        self.assertTrue(all(event["source"] == "synthetic_parameter_design" for event in events))
+
     def test_flat_uniform_rain_is_an_exact_theoretical_solution(self):
         scales = {"x0": 0., "y0": 0., "lx": 100., "ly": 100.,
                   "time_s": 7200., "rain_m_s": 1e-5, "duration_s": 3600.,

@@ -44,9 +44,11 @@ def _loss(model, terrain, cases, rng, cfg):
                          cfg.get("slope_sampling_fraction", 0.))
         raw = residuals(model, _tensor(points, grad=True), terrain,
                         h_reg=cfg["h_regularization_m"])
-        scales = raw.new_tensor([cfg["continuity_scale_m_s"],
-                                 cfg["momentum_scale_m2_s2"],
-                                 cfg["momentum_scale_m2_s2"]])
+        rain_depth = points[0, 3] * min(points[0, 4], end_s)
+        continuity_scale = max(cfg["continuity_scale_m_s"], points[0, 3])
+        momentum_scale = max(cfg["momentum_scale_m2_s2"],
+                             9.81 * rain_depth * cfg.get("momentum_slope_scale", .1))
+        scales = raw.new_tensor([continuity_scale, momentum_scale, momentum_scale])
         normalized_square = (raw / scales).square()
         if multiplier > 1:
             scores = normalized_square.detach().mean(dim=1)
@@ -96,7 +98,8 @@ def evaluate(model, terrain, events, cfg, *, seed=9001):
 def train(terrain, events, cfg: dict, output_dir: str | Path):
     output = Path(output_dir); output.mkdir(parents=True, exist_ok=False)
     torch.manual_seed(cfg["seed"]); np.random.seed(cfg["seed"]); torch.set_num_threads(cfg["threads"])
-    model = ConditionalFloodPINN(cfg["scales"], cfg["width"], cfg["layers"])
+    model = ConditionalFloodPINN(cfg["scales"], cfg["width"], cfg["layers"],
+                                 cfg.get("log_conditions", False))
     if cfg.get("initial_model_path"):
         initial = torch.load(cfg["initial_model_path"], map_location="cpu", weights_only=True)
         if initial["terrain_fingerprint"] != terrain.fingerprint:
@@ -149,6 +152,7 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
         writer = csv.DictWriter(stream, all_metrics[0]); writer.writeheader(); writer.writerows(all_metrics)
     checkpoint = {"model_state": model.state_dict(), "scales": cfg["scales"],
                   "width": cfg["width"], "layers": cfg["layers"],
+                  "log_conditions": model.log_conditions,
                   "terrain_fingerprint": terrain.fingerprint,
                   "training_rain_domain": {"rainfall_mm_hr": [min(e["mean_intensity_mm_hr"] for e in training), max(e["mean_intensity_mm_hr"] for e in training)],
                                            "duration_s": [min(e["duration_s"] for e in training), max(e["duration_s"] for e in training)]}}

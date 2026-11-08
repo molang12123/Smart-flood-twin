@@ -65,3 +65,27 @@ def extract_events(path: str | Path, *, minimum_total_mm: float = .5):
     for i, event in enumerate(events):
         event["split"] = "train" if i < train_end else "validation" if i < validation_end else "test"
     return events
+
+
+def add_design_events(events, intensities_mm_hr, durations_hr):
+    """Add a deterministic parameter grid without pretending it was observed."""
+    result = list(events)
+    for i, intensity in enumerate(intensities_mm_hr):
+        for j, hours in enumerate(durations_hr):
+            if intensity <= 0 or hours <= 0:
+                raise ValueError("design rainfall intensity and duration must be positive")
+            # Domain edges remain training cases so the checkpoint's supported
+            # rectangle is actually constrained. Interior combinations provide
+            # complete held-out scenarios.
+            edge = i in {0, len(intensities_mm_hr) - 1} or j in {0, len(durations_hr) - 1}
+            marker = (i * 17 + j * 31) % 10
+            split = "train" if edge else "validation" if marker == 3 else "test" if marker == 7 else "train"
+            result.append({"event_id": f"design_r{i:02d}_d{j:02d}", "start": "",
+                           "duration_s": float(hours * 3600),
+                           "mean_intensity_mm_hr": float(intensity),
+                           "peak_hourly_mm_hr": float(intensity),
+                           "total_mm": float(intensity * hours), "hours": float(hours),
+                           "split": split, "source": "synthetic_parameter_design"})
+    for event in result:
+        event.setdefault("source", "C0M760_2024_observation")
+    return result

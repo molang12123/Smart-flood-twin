@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from minxiong_pinn.predict import load_model, predict
-from minxiong_pinn.rainfall import extract_events
+from minxiong_pinn.rainfall import add_design_events, extract_events
 from minxiong_pinn.terrain import MaskedRasterTerrain
 from minxiong_pinn.training import train
 
@@ -23,6 +23,9 @@ def main(config_path="configs/minxiong.json"):
     resolve = lambda value: (base / value).resolve()
     terrain = MaskedRasterTerrain(resolve(cfg["terrain_tif"]), manning_n=cfg["manning_n"])
     events = extract_events(resolve(cfg["rainfall_zip"]), minimum_total_mm=cfg["minimum_event_total_mm"])
+    design = cfg.get("design_rainfall")
+    if design and cfg["action"] in {"train", "train_and_predict"}:
+        events = add_design_events(events, design["intensities_mm_hr"], design["durations_hr"])
     catalog = resolve(cfg["event_catalog_csv"]); catalog.parent.mkdir(parents=True, exist_ok=True)
     with catalog.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, events[0]); writer.writeheader(); writer.writerows(events)
