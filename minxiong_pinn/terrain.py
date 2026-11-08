@@ -49,6 +49,12 @@ class MaskedRasterTerrain:
         cap = max(float(np.percentile(active_slope, 99)), 1e-12)
         weights = 1. + np.clip(active_slope / cap, 0., 1.) * 4.
         self._slope_probabilities = weights / weights.sum()
+        interior = mask.copy()
+        interior[0, :] = interior[-1, :] = False
+        interior[:, 0] = interior[:, -1] = False
+        interior[1:-1, 1:-1] &= (mask[1:-1, :-2] & mask[1:-1, 2:] &
+                                 mask[:-2, 1:-1] & mask[2:, 1:-1])
+        self.interior_rows, self.interior_cols = np.nonzero(interior)
         self.boundary_xy, self.boundary_normals, self.boundary_lengths = self._boundary_faces()
         digest = hashlib.sha256(self.path.read_bytes())
         digest.update(np.asarray([self.manning_n], dtype="<f8").tobytes())
@@ -115,6 +121,15 @@ class MaskedRasterTerrain:
         # the exact face may map to its NoData neighbour under floor indexing.
         epsilon = min(self.dx, self.dy) * 1e-6
         return self.boundary_xy[indexes] - normals * epsilon, normals
+
+    def sample_control_volumes(self, rng: np.random.Generator, count: int):
+        if len(self.interior_rows) == 0:
+            raise ValueError("terrain has no active cells with four active neighbours")
+        indexes = rng.integers(0, len(self.interior_rows), size=count)
+        rows, cols = self.interior_rows[indexes], self.interior_cols[indexes]
+        west, _, _, north = self.bounds
+        return np.column_stack((west + (cols + .5) * self.dx,
+                                north - (rows + .5) * self.dy))
 
     def query(self, x, y):
         x, y = np.broadcast_arrays(np.asarray(x, float), np.asarray(y, float))

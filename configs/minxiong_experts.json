@@ -1,0 +1,45 @@
+{
+  "terrain_tif": "../data/minxiong/裁剪后民雄.tif",
+  "rainfall_zip": "../data/minxiong/民雄降雨.zip",
+  "manning_n": 0.03,
+  "output_root": "../outputs/minxiong/experts_fv_v1",
+  "durations_hr": [1, 2, 3, 6, 12, 18, 24, 30, 37],
+  "experts": [
+    {"name": "low", "intensities_mm_hr": [0.5, 1, 2, 5, 10, 15, 20, 25, 30], "velocity_m_s": 3.0},
+    {"name": "medium", "intensities_mm_hr": [20, 30, 50, 75, 100, 125, 150, 175, 200], "velocity_m_s": 10.0},
+    {"name": "high", "intensities_mm_hr": [150, 200, 250, 350, 450, 550, 650, 700], "velocity_m_s": 20.0}
+  ],
+  "training": {
+    "seed": 42,
+    "threads": 4,
+    "width": 128,
+    "layers": 6,
+    "adam_steps": 1200,
+    "learning_rate": 0.0003,
+    "log_conditions": true,
+    "physics_form": "finite_volume",
+    "weak_dt_s": 600.0,
+    "max_seconds": 900,
+    "scenarios_per_batch": 8,
+    "interior_points": 256,
+    "boundary_points": 64,
+    "mass_points": 128,
+    "validation_interval": 50,
+    "gradient_clip": 10.0,
+    "h_regularization_m": 0.001,
+    "time_end_s": 154800.0,
+    "continuity_scale_m_s": 0.000001,
+    "momentum_scale_m2_s2": 0.005,
+    "momentum_slope_scale": 0.1,
+    "slope_sampling_fraction": 0.5,
+    "extreme_residual_candidate_multiplier": 2,
+    "loss_weights": {"pde": 1.0, "boundary": 2.0, "mass": 10.0},
+    "success_thresholds": {"test_mean_pde_loss": 0.02, "test_mean_mass_loss": 0.01, "worst_all_event_mass_loss": 0.05, "worst_all_event_pde_loss": 0.1},
+    "assumptions": [
+      "DEM valid pixels are the active domain; NoData is excluded and elevation sign is unrestricted.",
+      "Dry initial condition and no-flow mask boundary.",
+      "Spatially uniform constant Manning n=0.03.",
+      "Uniform event-mean rainfall; no drainage, infiltration, river stage, buildings, or pumps."
+    ]
+  }
+}

@@ -34,16 +34,61 @@ def _tensor(array, *, grad=False):
     return torch.as_tensor(array, dtype=torch.float64).requires_grad_(grad)
 
 
+def _fv_residuals(model, terrain, case, rng, cfg):
+    """Differentiable midpoint finite-volume balance on active 20 m cells."""
+    count = cfg["interior_points"]
+    xy = terrain.sample_control_volumes(rng, count)
+    dt = min(float(cfg.get("weak_dt_s", 600.)), cfg["time_end_s"])
+    t0 = rng.uniform(0, cfg["time_end_s"] - dt, count); t1 = t0 + dt; tm = (t0 + t1) / 2
+    rate = case["mean_intensity_mm_hr"] / 3_600_000.; duration = case["duration_s"]
+
+    def make(coords, times):
+        p = np.empty((count, 5)); p[:, :2] = coords; p[:, 2] = times
+        p[:, 3] = rate; p[:, 4] = duration
+        return _tensor(p)
+
+    centre0, centre1 = model(make(xy, t0)), model(make(xy, t1))
+    east = xy + np.array([terrain.dx / 2, 0]); west = xy - np.array([terrain.dx / 2, 0])
+    north = xy + np.array([0, terrain.dy / 2]); south = xy - np.array([0, terrain.dy / 2])
+    ve, vw, vn, vs = (model(make(coords, tm)) for coords in (east, west, north, south))
+    h0, u0, v0 = centre0.T; h1, u1, v1 = centre1.T
+    he, ue, ve_y = ve.T; hw, uw, vw_y = vw.T; hn, un, vn_y = vn.T; hs, us, vs_y = vs.T
+    gravity = 9.81
+    mass = ((h1 - h0) / dt + (he * ue - hw * uw) / terrain.dx +
+            (hn * vn_y - hs * vs_y) / terrain.dy)
+    mx = ((h1 * u1 - h0 * u0) / dt +
+          (he * ue.square() + .5 * gravity * he.square() - hw * uw.square() - .5 * gravity * hw.square()) / terrain.dx +
+          (hn * un * vn_y - hs * us * vs_y) / terrain.dy)
+    my = ((h1 * v1 - h0 * v0) / dt +
+          (he * ue * ve_y - hw * uw * vw_y) / terrain.dx +
+          (hn * vn_y.square() + .5 * gravity * hn.square() - hs * vs_y.square() - .5 * gravity * hs.square()) / terrain.dy)
+    data = terrain.query(xy[:, 0], xy[:, 1])
+    zx = mx.new_tensor(data["zx"]); zy = my.new_tensor(data["zy"]); n = mx.new_tensor(data["n"])
+    hmid = .5 * (h0 + h1); umid = .5 * (u0 + u1); vmid = .5 * (v0 + v1)
+    speed = torch.sqrt(umid.square() + vmid.square() + 1e-12)
+    friction = gravity * n.square() * hmid * speed / hmid.clamp_min(cfg["h_regularization_m"]).pow(4 / 3)
+    mx = mx + gravity * hmid * zx + friction * umid
+    my = my + gravity * hmid * zy + friction * vmid
+    rain_seconds = np.maximum(0., np.minimum(t1, duration) - np.minimum(t0, duration))
+    mass = mass - mass.new_tensor(rate * rain_seconds / dt)
+    return torch.stack((mass, mx, my), dim=1), rate, duration
+
+
 def _loss(model, terrain, cases, rng, cfg):
     pde_losses, bc_losses, mass_losses = [], [], []
     end_s = cfg["time_end_s"]
     for case in cases:
-        multiplier = (cfg.get("extreme_residual_candidate_multiplier", 1)
-                      if case.get("total_mm", 0) >= cfg.get("extreme_total_mm", math.inf) else 1)
-        points = _points(terrain, rng, case, cfg["interior_points"] * multiplier, end_s,
-                         cfg.get("slope_sampling_fraction", 0.))
-        raw = residuals(model, _tensor(points, grad=True), terrain,
-                        h_reg=cfg["h_regularization_m"])
+        if cfg.get("physics_form", "strong") == "finite_volume":
+            raw, rate, duration = _fv_residuals(model, terrain, case, rng, cfg)
+            points = np.array([[0., 0., 0., rate, duration]])
+            multiplier = 1
+        else:
+            multiplier = (cfg.get("extreme_residual_candidate_multiplier", 1)
+                          if case.get("total_mm", 0) >= cfg.get("extreme_total_mm", math.inf) else 1)
+            points = _points(terrain, rng, case, cfg["interior_points"] * multiplier, end_s,
+                             cfg.get("slope_sampling_fraction", 0.))
+            raw = residuals(model, _tensor(points, grad=True), terrain,
+                            h_reg=cfg["h_regularization_m"])
         rain_depth = points[0, 3] * min(points[0, 4], end_s)
         continuity_scale = max(cfg["continuity_scale_m_s"], points[0, 3])
         momentum_scale = max(cfg["momentum_scale_m2_s2"],

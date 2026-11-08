@@ -12,9 +12,29 @@ from minxiong_pinn.model import ConditionalFloodPINN
 from flood_pinn.physics import residuals
 from minxiong_pinn.rainfall import add_design_events, extract_events
 from minxiong_pinn.terrain import MaskedRasterTerrain
+from minxiong_pinn.training import _fv_residuals
 
 
 class MinxiongPINNTests(unittest.TestCase):
+    def test_finite_volume_balance_is_exact_for_flat_uniform_rain(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "flat.tif"
+            with rasterio.open(path, "w", driver="GTiff", width=3, height=3, count=1,
+                               dtype="float32", crs="EPSG:3826", transform=from_origin(0, 60, 20, 20),
+                               nodata=-9999.) as dst:
+                dst.write(np.zeros((3, 3), dtype=np.float32), 1)
+            terrain = MaskedRasterTerrain(path, manning_n=.03)
+            scales = {"x0": 0., "y0": 0., "lx": 60., "ly": 60., "time_s": 7200.,
+                      "rain_m_s": 10 / 3_600_000., "duration_s": 3600.,
+                      "depth_m": .01, "velocity_m_s": 1., "ramp_s": 60.}
+            model = ConditionalFloodPINN(scales, width=8, layers=2)
+            for parameter in model.parameters(): parameter.data.zero_()
+            cfg = {"interior_points": 8, "weak_dt_s": 600., "time_end_s": 7200.,
+                   "h_regularization_m": .001}
+            case = {"mean_intensity_mm_hr": 10., "duration_s": 3600.}
+            raw, _, _ = _fv_residuals(model, terrain, case, np.random.default_rng(2), cfg)
+            torch.testing.assert_close(raw, torch.zeros_like(raw), atol=2e-9, rtol=0)
+
     def test_log_conditioning_resolves_full_rainfall_range(self):
         scales = {"x0": 0., "y0": 0., "lx": 1., "ly": 1., "time_s": 1.,
                   "rain_m_s": 700 / 3_600_000., "rain_min_m_s": .5 / 3_600_000.,
