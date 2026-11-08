@@ -45,6 +45,10 @@ class MaskedRasterTerrain:
         self.active_count = int(mask.sum())
         self.active_area_m2 = self.active_count * self.dx * self.dy
         self.zx, self.zy = self._local_slopes()
+        active_slope = np.hypot(self.zx[mask], self.zy[mask])
+        cap = max(float(np.percentile(active_slope, 99)), 1e-12)
+        weights = 1. + np.clip(active_slope / cap, 0., 1.) * 4.
+        self._slope_probabilities = weights / weights.sum()
         self.boundary_xy, self.boundary_normals, self.boundary_lengths = self._boundary_faces()
         digest = hashlib.sha256(self.path.read_bytes())
         digest.update(np.asarray([self.manning_n], dtype="<f8").tobytes())
@@ -86,8 +90,16 @@ class MaskedRasterTerrain:
         return (np.asarray(xy, dtype=np.float64), np.asarray(normals, dtype=np.float64),
                 np.asarray(lengths, dtype=np.float64))
 
-    def sample_points(self, rng: np.random.Generator, count: int, *, jitter: bool = True):
-        indexes = rng.integers(0, self.active_count, size=count)
+    def sample_points(self, rng: np.random.Generator, count: int, *, jitter: bool = True,
+                      slope_fraction: float = 0.):
+        if not 0 <= slope_fraction <= 1:
+            raise ValueError("slope_fraction must be between zero and one")
+        weighted = int(round(count * slope_fraction))
+        indexes = np.concatenate((
+            rng.integers(0, self.active_count, size=count - weighted),
+            rng.choice(self.active_count, size=weighted, replace=True, p=self._slope_probabilities),
+        ))
+        rng.shuffle(indexes)
         rows, cols = self.active_rows[indexes], self.active_cols[indexes]
         west, _, _, north = self.bounds
         jx = rng.uniform(-.499, .499, count) if jitter else np.zeros(count)
@@ -98,7 +110,11 @@ class MaskedRasterTerrain:
 
     def sample_boundary(self, rng: np.random.Generator, count: int):
         indexes = rng.integers(0, len(self.boundary_xy), size=count)
-        return self.boundary_xy[indexes], self.boundary_normals[indexes]
+        normals = self.boundary_normals[indexes]
+        # Evaluate the wall condition infinitesimally inside the active cell;
+        # the exact face may map to its NoData neighbour under floor indexing.
+        epsilon = min(self.dx, self.dy) * 1e-6
+        return self.boundary_xy[indexes] - normals * epsilon, normals
 
     def query(self, x, y):
         x, y = np.broadcast_arrays(np.asarray(x, float), np.asarray(y, float))

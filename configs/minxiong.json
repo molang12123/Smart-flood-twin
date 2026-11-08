@@ -5,18 +5,18 @@
   "event_catalog_csv": "../data/minxiong/rainfall_events.csv",
   "minimum_event_total_mm": 0.5,
   "manning_n": 0.03,
-  "training_output_dir": "../outputs/minxiong/training_v4",
+  "training_output_dir": "../outputs/minxiong/training_next",
   "model_path": "../models/minxiong/model.pt",
   "training": {
     "seed": 42,
     "threads": 4,
     "width": 96,
     "layers": 5,
-    "adam_steps": 500,
-    "learning_rate": 0.0005,
+    "adam_steps": 1000,
+    "learning_rate": 0.0001,
     "max_seconds": 900,
     "scenarios_per_batch": 6,
-    "interior_points": 128,
+    "interior_points": 256,
     "boundary_points": 64,
     "mass_points": 128,
     "validation_interval": 50,
@@ -24,9 +24,12 @@
     "h_regularization_m": 0.001,
     "time_end_s": 154800.0,
     "continuity_scale_m_s": 0.00002,
-    "momentum_scale_m2_s2": 1.0,
+    "momentum_scale_m2_s2": 0.05,
+    "slope_sampling_fraction": 0.5,
+    "extreme_total_mm": 500.0,
+    "extreme_residual_candidate_multiplier": 4,
     "loss_weights": {"pde": 1.0, "boundary": 2.0, "mass": 10.0},
-    "initial_model_path": "outputs/minxiong/training_v3/model.pt",
+    "initial_model_path": "models/minxiong/model.pt",
     "scales": {
       "x0": 186100.0,
       "y0": 2599580.0,
@@ -47,7 +50,7 @@
       "Each observed event is represented by its mean intensity and contiguous positive-hour duration.",
       "No drainage, infiltration, river stage, buildings, or pump operation is represented."
     ],
-    "success_thresholds": {"test_mean_pde_loss": 0.1, "test_mean_mass_loss": 0.01, "worst_all_event_mass_loss": 0.05}
+    "success_thresholds": {"test_mean_pde_loss": 0.02, "test_mean_mass_loss": 0.01, "worst_all_event_mass_loss": 0.05, "worst_all_event_pde_loss": 0.1}
   },
   "prediction": {
     "rainfall_mm_hr": 10.0,

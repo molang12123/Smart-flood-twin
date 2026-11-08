@@ -13,8 +13,8 @@ from flood_pinn.physics import residuals
 from .model import ConditionalFloodPINN
 
 
-def _points(terrain, rng, case, count, end_s):
-    xy = terrain.sample_points(rng, count)
+def _points(terrain, rng, case, count, end_s, slope_fraction):
+    xy = terrain.sample_points(rng, count, slope_fraction=slope_fraction)
     p = np.empty((count, 5), dtype=np.float64)
     p[:, :2] = xy
     p[:, 2] = rng.uniform(0, end_s, count)
@@ -38,13 +38,21 @@ def _loss(model, terrain, cases, rng, cfg):
     pde_losses, bc_losses, mass_losses = [], [], []
     end_s = cfg["time_end_s"]
     for case in cases:
-        points = _points(terrain, rng, case, cfg["interior_points"], end_s)
+        multiplier = (cfg.get("extreme_residual_candidate_multiplier", 1)
+                      if case.get("total_mm", 0) >= cfg.get("extreme_total_mm", math.inf) else 1)
+        points = _points(terrain, rng, case, cfg["interior_points"] * multiplier, end_s,
+                         cfg.get("slope_sampling_fraction", 0.))
         raw = residuals(model, _tensor(points, grad=True), terrain,
                         h_reg=cfg["h_regularization_m"])
         scales = raw.new_tensor([cfg["continuity_scale_m_s"],
                                  cfg["momentum_scale_m2_s2"],
                                  cfg["momentum_scale_m2_s2"]])
-        pde_losses.append((raw / scales).square().mean())
+        normalized_square = (raw / scales).square()
+        if multiplier > 1:
+            scores = normalized_square.detach().mean(dim=1)
+            indexes = torch.topk(scores, cfg["interior_points"], sorted=False).indices
+            normalized_square = normalized_square[indexes]
+        pde_losses.append(normalized_square.mean())
 
         xy, normals = terrain.sample_boundary(rng, cfg["boundary_points"])
         b = np.empty((len(xy), 5)); b[:, :2] = xy
@@ -161,10 +169,13 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
     thresholds = cfg["success_thresholds"]
     test = split_summary["test"]
     worst_mass = max(float(row["mass_loss"]) for row in all_metrics)
+    worst_pde = max(float(row["pde_loss"]) for row in all_metrics)
     report["worst_all_event_mass_loss"] = worst_mass
+    report["worst_all_event_pde_loss"] = worst_pde
     report["physics_training_passed"] = bool(test["mean_pde_loss"] <= thresholds["test_mean_pde_loss"] and
                                              test["mean_mass_loss"] <= thresholds["test_mean_mass_loss"] and
-                                             worst_mass <= thresholds["worst_all_event_mass_loss"])
+                                             worst_mass <= thresholds["worst_all_event_mass_loss"] and
+                                             worst_pde <= thresholds["worst_all_event_pde_loss"])
     (output / "training_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     from .reporting import generate_report
     generate_report(output)

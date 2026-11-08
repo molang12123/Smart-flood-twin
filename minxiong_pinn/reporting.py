@@ -40,11 +40,13 @@ def generate_report(output_dir: str | Path):
     rows = "".join(f"<tr><th>{name}</th><td>{value['events']}</td><td>{value['mean_pde_loss']:.6g}</td><td>{value['mean_mass_loss']:.6g}</td><td>{value['worst_loss']:.6g}</td></tr>"
                    for name, value in report["splits"].items())
     assumptions = "".join(f"<li>{item}</li>" for item in report["assumptions"])
+    worst_pde = report.get("worst_all_event_pde_loss")
+    worst_pde_text = "未計算" if worst_pde is None else f"{worst_pde:.6g}"
     html = f"""<!doctype html><html lang='zh-Hant'><meta charset='utf-8'><title>民雄 PINN 訓練成果</title>
 <style>body{{font:16px/1.6 system-ui;max-width:1050px;margin:35px auto;padding:0 20px;color:#17202a}}h1,h2{{color:#174a6e}}.status{{padding:14px;background:#eef7f1;border-left:5px solid #29804b}}table{{border-collapse:collapse;width:100%}}th,td{{padding:8px;border:1px solid #ccd6dd;text-align:right}}th:first-child{{text-align:left}}img{{max-width:100%}}code{{background:#eef2f5;padding:2px 5px}}</style>
 <h1>民雄固定地形參數化 PINN 訓練成果</h1><p class='status'><b>{status}</b><br>完成 {report['completed_steps']} 步，耗時 {report['elapsed_s']:.1f} 秒；最佳驗證 loss {report['best_validation_loss']:.6g}。</p>
 <h2>獨立事件評估</h2><table><tr><th>資料組</th><th>事件數</th><th>平均 PDE loss</th><th>平均水量 loss</th><th>最差總 loss</th></tr>{rows}</table>
-<p>全部 151 個事件中的最差水量 loss：<b>{report['worst_all_event_mass_loss']:.6g}</b>。驗證與測試事件沒有加入參數更新。</p>
+<p>全部 151 個事件中的最差水量 loss：<b>{report['worst_all_event_mass_loss']:.6g}</b>；最差 PDE loss：<b>{worst_pde_text}</b>。驗證與測試事件沒有加入參數更新。</p>
 <img src='data:image/png;base64,{figure_data('history')}'><img src='data:image/png;base64,{figure_data('events')}'>
 <h2>固定地形</h2><pre>{json.dumps(report['terrain'], ensure_ascii=False, indent=2)}</pre>
 <h2>目前物理假設</h2><ul>{assumptions}</ul>
