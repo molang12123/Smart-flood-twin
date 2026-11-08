@@ -3,6 +3,7 @@
 numpy==2.3.5
 torch==2.14.1+cpu
 matplotlib==3.10.8
+rasterio==1.5.2
 filelock==3.32.3
 typing_extensions==4.16.0
 sympy==1.14.0

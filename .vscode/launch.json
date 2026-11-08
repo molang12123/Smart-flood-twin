@@ -10,6 +10,16 @@
       "cwd": "${workspaceFolder}",
       "console": "internalConsole",
       "justMyCode": true
+    },
+    {
+      "name": "Minxiong PINN: fixed DEM train/predict",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/run_minxiong_vscode.py",
+      "args": ["configs/minxiong.json"],
+      "cwd": "${workspaceFolder}",
+      "console": "internalConsole",
+      "justMyCode": true
     }
   ]
 }

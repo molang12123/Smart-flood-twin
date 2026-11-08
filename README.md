@@ -1,5 +1,7 @@
 # Smart-flood-twin
 
+民雄固定 DEM 参数化 PINN 已提供 VS Code F5 运行入口。请先阅读 [民雄 VS Code 使用指南](docs/MINXIONG_VSCODE_GUIDE.md)，训练成果见 [自包含 HTML 报告](reports/minxiong_training_results.html)。
+
 固定地形、多降雨情境的二维浅水方程参数化 PINN。范围限于模型、训练/验证、独立 Python 推理及数据交接，不包含 QGIS 制图、HTTP 服务或 Unreal Engine 场景。
 
 **当前是可运行的研究原型，不是已验证的民雄预测模型。** 合成小案例的读入→训练→保存→新进程推理→时序/流量/水量导出已运行；短训练的误差和水量门槛尚未通过，默认生产推理会拒绝无验证证据的模型。真实 DEM、粗糙度/初边界、可信参考、雨情范围和精度/性能预算仍待团队提供。

@@ -1,0 +1,67 @@
+{
+  "completed_steps": 500,
+  "requested_steps": 500,
+  "elapsed_s": 60.686814073007554,
+  "best_validation_loss": 0.00029042650680391203,
+  "splits": {
+    "train": {
+      "events": 105,
+      "mean_loss": 0.0011122179003696048,
+      "worst_loss": 0.08790130231343986,
+      "mean_pde_loss": 0.0009245464405784708,
+      "mean_mass_loss": 1.194244787960824e-05
+    },
+    "validation": {
+      "events": 23,
+      "mean_loss": 0.0002813219398426263,
+      "worst_loss": 0.0014774148967521986,
+      "mean_pde_loss": 8.709352824180598e-05,
+      "mean_mass_loss": 1.2182696655540697e-05
+    },
+    "test": {
+      "events": 23,
+      "mean_loss": 0.0002505014552204299,
+      "worst_loss": 0.0010150887256347393,
+      "mean_pde_loss": 6.718666734236602e-05,
+      "mean_mass_loss": 1.1917466555706083e-05
+    }
+  },
+  "terrain": {
+    "source": "/workspace/Smart-flood-twin/data/minxiong/裁剪后民雄.tif",
+    "sha256": "17508ef306bbd892fec82a710d1ffcbee9f5de07cbd9cdbdeb82809bd8acd655",
+    "fingerprint": "dd26d2e5e069ba57311103a448bb62290b797d1f1593156c47a2c5057d142ab3",
+    "crs": "EPSG:3826",
+    "width": 741,
+    "height": 480,
+    "dx_m": 20.0,
+    "dy_m": 20.0,
+    "bounds": [
+      186100.0,
+      200920.0,
+      2599580.0,
+      2609180.0
+    ],
+    "active_cells": 212239,
+    "active_area_m2": 84895600.0,
+    "nodata": 0.0,
+    "valid_elevation_min": 6.059999942779541,
+    "valid_elevation_max": 167.72000122070312,
+    "manning_n": 0.03
+  },
+  "assumptions": [
+    "DEM valid pixels are the active domain; NoData is excluded and elevation sign is unrestricted.",
+    "Dry initial condition.",
+    "All exposed mask faces are treated as no-flow walls pending surveyed boundary conditions.",
+    "Spatially uniform constant Manning n=0.03 pending a roughness raster.",
+    "Each observed event is represented by its mean intensity and contiguous positive-hour duration.",
+    "No drainage, infiltration, river stage, buildings, or pump operation is represented."
+  ],
+  "external_flood_observation_validation": "not_available",
+  "success_thresholds": {
+    "test_mean_pde_loss": 0.1,
+    "test_mean_mass_loss": 0.01,
+    "worst_all_event_mass_loss": 0.05
+  },
+  "worst_all_event_mass_loss": 4.1451359720667824e-05,
+  "physics_training_passed": true
+}
