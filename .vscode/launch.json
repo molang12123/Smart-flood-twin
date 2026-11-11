@@ -20,6 +20,15 @@
       "cwd": "${workspaceFolder}",
       "console": "internalConsole",
       "justMyCode": true
+    },
+    {
+      "name": "民雄 PINN：用户输入预测",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/run_minxiong_gui.py",
+      "cwd": "${workspaceFolder}",
+      "console": "internalConsole",
+      "justMyCode": true
     }
   ]
 }

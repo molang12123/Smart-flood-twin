@@ -19,7 +19,13 @@ def load_model(path, terrain):
     return model, checkpoint
 
 
-def predict(model, checkpoint, terrain, rainfall_mm_hr, duration_s, times_s, output_dir, *, batch_size=8192):
+def predict(model, checkpoint, terrain, rainfall_mm_hr, duration_s, times_s, output_dir, *,
+            batch_size=8192, progress_callback=None):
+    times_s = tuple(float(value) for value in times_s)
+    if not times_s or any(not np.isfinite(value) for value in times_s):
+        raise ValueError("prediction times must be a nonempty finite sequence")
+    if any(right <= left for left, right in zip(times_s, times_s[1:])):
+        raise ValueError("prediction times must be strictly increasing without duplicates")
     rain_domain = checkpoint["training_rain_domain"]
     if not rain_domain["rainfall_mm_hr"][0] <= rainfall_mm_hr <= rain_domain["rainfall_mm_hr"][1]:
         raise ValueError("rainfall intensity is outside the trained event range")
@@ -57,5 +63,7 @@ def predict(model, checkpoint, terrain, rainfall_mm_hr, duration_s, times_s, out
                            count=1, dtype="float32", crs=terrain.crs, transform=terrain.transform,
                            nodata=np.nan, compress="deflate") as dst:
             dst.write(raster, 1)
+        if progress_callback is not None:
+            progress_callback(index + 1, len(times_s), float(t), summary["frames"][-1])
     (output / "prediction_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
