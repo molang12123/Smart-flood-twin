@@ -1,0 +1,115 @@
+{
+  "terrain_tif": "../data/minxiong/裁剪后民雄.tif",
+  "rainfall_zip": "../data/minxiong/民雄降雨.zip",
+  "manning_n": 0.03,
+  "output_root": "../outputs/minxiong/experts_wb_0_800_v6",
+  "durations_hr": [1, 2, 3, 6, 12, 18, 24],
+  "rain_reference_mm_hr": 1.0,
+  "duration_reference_hr": 1.0,
+  "wet_gate_m": 0.00001,
+  "stop_on_failed_expert": true,
+  "design_split_markers": {
+    "validation": [1, 3],
+    "test": [6, 8]
+  },
+  "routing": {
+    "low_max_mm_hr": 40.0,
+    "medium_max_mm_hr": 250.0,
+    "policy": "single_expert_no_blending",
+    "overlaps_for_audit_only": [[30.0, 50.0], [200.0, 300.0]]
+  },
+  "overlap_audit": {
+    "spatial_samples": 4096,
+    "boundary_samples": 1024,
+    "batch_size": 8192,
+    "seed": 20261113
+  },
+  "experts": [
+    {
+      "name": "low",
+      "intensities_mm_hr": [0, 0.5, 1, 2, 5, 10, 20, 30, 40, 50],
+      "velocity_m_s": 4.0
+    },
+    {
+      "name": "medium",
+      "intensities_mm_hr": [30, 50, 75, 100, 150, 200, 250, 300],
+      "velocity_m_s": 10.0
+    },
+    {
+      "name": "high",
+      "intensities_mm_hr": [200, 250, 350, 450, 550, 650, 700, 800],
+      "velocity_m_s": 20.0
+    }
+  ],
+  "training": {
+    "seed": 42,
+    "validation_seed": 20261114,
+    "threads": 4,
+    "width": 128,
+    "layers": 6,
+    "adam_steps": 1800,
+    "learning_rate": 0.0003,
+    "log_conditions": false,
+    "log1p_conditions": true,
+    "wet_velocity_gate": true,
+    "terrain_features": true,
+    "enhanced_time_features": true,
+    "mass_conserving_projection": true,
+    "mass_projection_anchor_points": 512,
+    "mass_projection_strata": 32,
+    "mass_projection_seed": 20261113,
+    "baseline_initialization": true,
+    "depth_warmup_steps": 0,
+    "depth_gradient_scale": 1.0,
+    "physics_form": "finite_volume",
+    "weak_dt_s": 600.0,
+    "fv_time_slices": 5,
+    "max_seconds": 1800,
+    "scenario_sampling": "uniform",
+    "always_include_zero_rain": false,
+    "always_include_extreme": true,
+    "scenarios_per_batch": 4,
+    "interior_points": 256,
+    "boundary_points": 64,
+    "mass_points": 128,
+    "stratified_mass_sampling": true,
+    "mass_sampling_strata": 16,
+    "validation_interval": 50,
+    "checkpoint_interval": 50,
+    "resume_training": true,
+    "gradient_clip": 10.0,
+    "h_regularization_m": 0.001,
+    "time_end_s": 129600.0,
+    "continuity_scale_m_s": 0.000001,
+    "momentum_scale_m2_s2": 0.005,
+    "momentum_slope_scale": 0.1,
+    "slope_sampling_fraction": 0.5,
+    "extreme_residual_candidate_multiplier": 2,
+    "loss_weights": {
+      "pde": 1.0,
+      "boundary": 2.0,
+      "mass": 10.0
+    },
+    "success_thresholds": {
+      "test_mean_pde_loss": 0.02,
+      "test_mean_continuity_loss": 0.02,
+      "test_boundary_rms_normal_velocity_m_s": 0.02,
+      "test_mean_mass_loss": 0.01,
+      "worst_all_event_mass_loss": 0.05,
+      "worst_all_event_pde_loss": 0.1,
+      "worst_all_event_continuity_loss": 0.1,
+      "worst_all_event_boundary_rms_normal_velocity_m_s": 0.05,
+      "overlap_mean_storage_difference": 0.02,
+      "overlap_relative_l2_depth": 0.1,
+      "overlap_boundary_rms_normal_velocity_m_s": 0.05,
+      "mass_projection_anchor_relative_error": 0.02
+    },
+    "assumptions": [
+      "DEM valid pixels are the active domain; NoData is excluded and elevation sign is unrestricted.",
+      "Dry initial condition and no-flow mask boundary.",
+      "Spatially uniform constant Manning n=0.03.",
+      "Uniform event-mean rainfall; no drainage, infiltration, river stage, buildings, or pumps.",
+      "The 800 mm/hr for 24 hr corner is an extreme closed-basin theoretical scenario, not an observed forecast claim."
+    ]
+  }
+}

@@ -10,7 +10,7 @@
 4. 在窗口输入平均雨势、降雨时长、模拟总时长和输出间隔。
 5. 选择输出目录，点击「开始预测」。日常预测不需要编辑任何 JSON。
 
-界面会从模型检查点读取实际支持范围。目前正式模型为：
+界面会从模型检查点读取实际支持范围。目前仓库中的正式回退模型 v4 为：
 
 - 平均雨势：0.5–23 mm/hr。
 - 降雨时长：1–37 小时。
@@ -26,6 +26,18 @@
 
 超出训练雨势或持续时间范围时程序会拒绝外推，并显示原因。
 
+## 0–800 mm/hr v6 状态
+
+新方案由三个固定地形专家组成：low 为 0–50、medium 为 30–300、high 为 200–800 mm/hr；用户范围目标为 0–800 mm/hr、降雨 1–24 小时、模拟最长 36 小时。重叠的 30–50 与 200–300 mm/hr 只用于一致性审核，实际预测按固定边界路由，不混合两个模型。
+
+这个范围只有在以下条件全部成立后才会出现在 GUI：
+
+- low、medium、high 各自通过 PDE、连续方程、封闭边界法向速度和全域水量门槛；
+- 两个重叠区的储水差、水深相对 L2、边界速度及训练锚点/正式全 DEM 归一化偏差门槛都通过；
+- 完整模型包已部署到 `models/minxiong/experts/`，且 manifest、检查点和审核证据互相匹配。
+
+训练或审核尚未通过时，GUI 会明确记录原因并继续载入 v4。不能通过手改 manifest、只复制 manifest，或放宽门槛来宣称已支持 800 mm/hr。
+
 `configs/minxiong.json` 与 `run_minxiong_vscode.py` 继续保留给开发、批次复现和训练，不再是一般用户输入预测参数的入口。
 
 ## 重新训练
@@ -33,6 +45,15 @@
 仓库已带有通过物理门槛的模型 `models/minxiong/model.pt`，日常预测不需要重新训练。若要重新训练，把 `action` 改成 `train`，同时把 `training_output_dir` 改成一个不存在的新目录。训练完成后只有在 `physics_training_passed` 为 `true`，并完成人工复核，才替换正式模型。
 
 训练成果报告位于 `reports/minxiong_training_results.html`。报告中的“通过”是研究级物理约束门槛，不是实测淹水精度认证。
+
+v6 三专家使用独立流程：
+
+```bash
+.venv/bin/python train_minxiong_experts.py configs/minxiong_experts_0_800.json
+.venv/bin/python audit_minxiong_experts.py configs/minxiong_experts_0_800.json
+```
+
+训练每 50 步写入可恢复的 `training_state.pt`。同一配置再次运行会恢复模型、优化器、最佳权重、历史、NumPy/Torch 随机状态和累计训练时间；若地形、训练事件或关键配置改变则拒绝恢复。审核通过后，应把输出根目录中的 manifest、`low/`、`medium/`、`high/` 及审核证据作为一个整体部署到 `models/minxiong/experts/`。当前训练尚未完成验收时，不要替换 v4。
 
 ## 目前假设与仍需资料
 

@@ -13,8 +13,28 @@ def load_model(path, terrain):
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if checkpoint["terrain_fingerprint"] != terrain.fingerprint:
         raise ValueError("checkpoint terrain fingerprint does not match this DEM/Manning setting")
-    model = ConditionalFloodPINN(checkpoint["scales"], checkpoint["width"], checkpoint["layers"],
-                                 checkpoint.get("log_conditions", False))
+    model = ConditionalFloodPINN(
+        checkpoint["scales"], checkpoint["width"], checkpoint["layers"],
+        checkpoint.get("log_conditions", False),
+        log1p_conditions=checkpoint.get("log1p_conditions", False),
+        wet_velocity_gate=checkpoint.get("wet_velocity_gate", False),
+        terrain_features=checkpoint.get("terrain_features", False),
+        terrain=terrain,
+        enhanced_time_features=checkpoint.get("enhanced_time_features", False),
+        mass_conserving_projection=checkpoint.get("mass_conserving_projection", False),
+        mass_projection_anchor_points=checkpoint.get("mass_projection_anchor_points", 512),
+        mass_projection_strata=checkpoint.get("mass_projection_strata", 32),
+        mass_projection_seed=checkpoint.get("mass_projection_seed", 20261113),
+    )
+    if checkpoint.get("terrain_features", False):
+        expected_version = checkpoint.get("terrain_feature_version")
+        actual_version = model.terrain_feature_metadata["version"]
+        if expected_version is not None and int(expected_version) != actual_version:
+            raise ValueError("checkpoint terrain-feature version is unsupported")
+    expected_anchors = checkpoint.get("mass_projection_anchor_fingerprint")
+    actual_anchors = getattr(model, "mass_projection_anchor_fingerprint", None)
+    if expected_anchors is not None and expected_anchors != actual_anchors:
+        raise ValueError("checkpoint mass-projection anchors cannot be reproduced")
     model.load_state_dict(checkpoint["model_state"]); model.eval()
     return model, checkpoint
 
@@ -39,22 +59,57 @@ def predict(model, checkpoint, terrain, rainfall_mm_hr, duration_s, times_s, out
     west, _, _, north = terrain.bounds
     xy[:, 0] = west + (terrain.active_cols + .5) * terrain.dx
     xy[:, 1] = north - (terrain.active_rows + .5) * terrain.dy
+    model_id = (model.model_id_for_rainfall(rainfall_mm_hr)
+                if hasattr(model, "model_id_for_rainfall")
+                else checkpoint.get("model_id", "single"))
     summary = {"rainfall_mm_hr": rainfall_mm_hr, "duration_s": duration_s,
-               "times_s": list(map(float, times_s)), "frames": []}
+               "times_s": list(map(float, times_s)), "model_id": model_id,
+               "frames": []}
+    if checkpoint.get("bundle_id"):
+        summary["bundle_id"] = checkpoint["bundle_id"]
+    prediction_model = model
+    if hasattr(model, "experts") and model_id in model.experts:
+        prediction_model = model.experts[model_id]
     for index, t in enumerate(times_s):
         result = np.empty((terrain.active_count, 3), dtype=np.float32)
+        factor_mean = None
+        if getattr(prediction_model, "mass_conserving_projection", False):
+            # Exact whole-domain first pass. The second pass shares this one
+            # scalar across chunks, making the result batch/order invariant.
+            factor_sum = 0.
+            if rainfall_mm_hr > 0 and t > 0:
+                for start in range(0, len(xy), batch_size):
+                    stop = min(len(xy), start + batch_size)
+                    p = np.empty((stop - start, 5)); p[:, :2] = xy[start:stop]
+                    p[:, 2] = t; p[:, 3] = rainfall_mm_hr / 3_600_000.; p[:, 4] = duration_s
+                    with torch.no_grad():
+                        factors = prediction_model.depth_factor(
+                            torch.as_tensor(p, dtype=torch.float64))
+                    factor_sum += float(factors.to(torch.float64).sum())
+                factor_mean = factor_sum / terrain.active_count
+            else:
+                factor_mean = 1.
         for start in range(0, len(xy), batch_size):
             stop = min(len(xy), start + batch_size)
             p = np.empty((stop - start, 5)); p[:, :2] = xy[start:stop]
             p[:, 2] = t; p[:, 3] = rainfall_mm_hr / 3_600_000.; p[:, 4] = duration_s
-            with torch.no_grad(): result[start:stop] = model(torch.as_tensor(p, dtype=torch.float64)).numpy()
+            with torch.no_grad():
+                point_tensor = torch.as_tensor(p, dtype=torch.float64)
+                if factor_mean is None:
+                    values = model(point_tensor)
+                else:
+                    values = prediction_model(
+                        point_tensor, projection_factor_mean=factor_mean)
+                result[start:stop] = values.numpy()
         frame = output / f"frame_{index:03d}.npz"
         np.savez_compressed(frame, row=terrain.active_rows, col=terrain.active_cols,
                             x=xy[:, 0], y=xy[:, 1], h=result[:, 0], u=result[:, 1], v=result[:, 2])
         summary["frames"].append({"time_s": float(t), "file": frame.name,
                                   "max_depth_m": float(result[:, 0].max()),
                                   "mean_depth_m": float(result[:, 0].mean()),
-                                  "max_speed_m_s": float(np.linalg.norm(result[:, 1:], axis=1).max())})
+                                  "max_speed_m_s": float(np.linalg.norm(result[:, 1:], axis=1).max()),
+                                  "mass_projection": ("full_active_domain"
+                                                      if factor_mean is not None else "none")})
         raster = np.full((terrain.height, terrain.width), np.nan, dtype=np.float32)
         raster[terrain.active_rows, terrain.active_cols] = result[:, 0]
         import rasterio

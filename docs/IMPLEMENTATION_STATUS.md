@@ -1,12 +1,20 @@
 # 本批实现与验证状态
 
+## 2026-11 v6 三专家更新
+
+当前代码已加入 0–800 mm/hr 的三专家研究方案：low 0–50、medium 30–300、high 200–800 mm/hr；降雨时长 1–24 小时，模拟时域 36 小时。有限体积损失使用 Audusse 水静力重构与 HLL 通量，并加入固定 DEM 地形特征、分层水量采样、增强时间特征、全域水量投影、连续方程独立门槛和专家重叠区审核。
+
+训练状态每 50 步原子保存，能够恢复模型、优化器、最佳权重、历史、NumPy/Torch RNG 及累计时间，并对地形、事件和关键配置做身份检查。完整测试在 Python 3.12/Linux CPU 环境为 **151 项执行、151 项通过、无跳过**。
+
+这些是实现与自动测试证据，不是 v6 已训练成功的声明。只有三个专家物理门槛及 30–50、200–300 mm/hr 重叠区一致性全部通过，审核器才会生成批准 manifest；在此之前 GUI 继续回退到 v4 0.5–23 mm/hr 模型。
+
 ## VS Code固定地形工作流更新
 
-现可在VS Code安装推荐Python/Debugger扩展、选择项目解释器，编辑`configs/vscode_run.json`中的雨强和雨时，按F5启动`run_in_vscode.py`。固定地形配置在`configs/fixed_terrain.json`，从同一份已保存CSV读取，训练采样和结果目录ID的随机性都不会生成/改变地形。
+民雄日常预测现可在 VS Code 安装推荐 Python/Debugger 扩展、选择项目解释器，按 F5 启动 **民雄 PINN：用户输入预测**。雨强、降雨时长、模拟时长和输出间隔直接在图形窗口输入，不需要编辑 JSON。固定地形始终读取 `data/minxiong/裁剪后民雄.tif`；NoData 由 raster mask 判定，高程正负不参与有效性判断。原 `configs/vscode_run.json`/`run_in_vscode.py` 仍是 synthetic 开发演示。
 
 每次生成自包含中文`training_results_report.html`和Markdown：训练状态、Loss/梯度、PDE/IC/BC、参考误差（若有）、水量、内嵌图表、异常和固定地形指纹。只预测时显示所加载模型的历史训练记录，不伪造本次训练。默认仍为固定合成地形短跑，未完成民雄真实验收。
 
-新增桌面入口/报告/平台兼容性回归；包括连续两次改变人为雨强但地形字节和指纹不变、仅推理不训练、错误和不可用输出路径保留失败报告、报告HTML转义/缺测/内嵌图、中文UTF-8/BOM输入、Windows不依赖resource等。93项当前测试全部执行并通过，无跳过。平台实际运行证据为Linux，未宣称原生Windows实机测试。完整使用步骤见`VSCODE_GUIDE.md`。
+新增桌面入口/报告/平台兼容性回归；包括连续两次改变人为雨强但地形字节和指纹不变、仅推理不训练、错误和不可用输出路径保留失败报告、报告HTML转义/缺测/内嵌图、中文UTF-8/BOM输入、Windows不依赖resource等。当前全套 151 项测试全部执行并通过，无跳过。平台实际运行证据为Linux，未宣称原生Windows实机测试。民雄完整使用步骤见`MINXIONG_VSCODE_GUIDE.md`。
 
 ## 已完成的软件能力
 
@@ -21,7 +29,7 @@
 
 ## 测试证据
 
-核心原型阶段全套：**77项测试执行，77项通过，无跳过**，当次约45秒。包括实际新进程CLI训练与加载推理、生产入口拒绝无验证模型、CSV回读/所有manifest哈希和行数检查；不是仅语法检查。当前VS Code更新的全套结果见本文件开头。
+核心原型阶段曾有 77 项测试；当前整合 v6 后的全套结果为：**151 项测试执行，151 项通过，无跳过**。包括实际新进程 CLI 训练与加载推理、生产入口拒绝无验证模型、CSV 回读/manifest 检查，以及 well-balanced FV、零雨量条件、地形/时间特征、分层水量采样、hard mass projection、断点恢复、专家路由与重叠审核；不是仅语法检查。
 
 运行：
 
@@ -31,7 +39,7 @@ MPLCONFIGDIR=/tmp/flood-pinn-mpl XDG_CACHE_HOME=/tmp/flood-pinn-cache .venv/bin/
 
 其他证据：CPU依赖锁与当前安装一致、editable包安装/CLI入口成功、模块语法编译通过、原始脚本hash/网络逐值等价测试通过。单情境50 Adam步、起伏地形10步和多情境100步加小规模LBFGS的合成短跑均实际执行，**它们只证明执行链路，不证明精度**。
 
-单独FV小斜面细化的实测与限制见`reference_validation.md`；尚无复杂地形well-balanced FV实现，不把原FV升级宣称为民雄可信参考。
+单独 FV 小斜面细化的实测与限制见 `reference_validation.md`。v6 已实现并自动测试 Audusse 水静力重构、HLL 通量、lake-at-rest、湿干界面、零雨与平地均匀雨等性质；这仍是数值实现证据，不等于民雄真实边界、排水系统或外部淹水观测已验证。
 
 ## 端到端短跑与明确的失败结论
 
@@ -55,11 +63,11 @@ MPLCONFIGDIR=/tmp/flood-pinn-mpl XDG_CACHE_HOME=/tmp/flood-pinn-cache .venv/bin/
 | 生产模型有效域 | 没有已通过证据，validated_domain为空；默认predict拒绝生产预测 |
 | 建筑/入渗/排水 | 未建模，不能把n或DEM视为已包含地下排水等作用 |
 | GPU/全乡性能 | 仅CPU合成实例实测；未验证GPU、全乡训练成本或实时延迟 |
-| 精确续训 | 推理权重和配置已保存，但未实现optimizer/scheduler/RNG全状态恢复 |
+| 精确续训 | v6 `training_state.pt` 已恢复模型、optimizer、最佳权重、历史、NumPy/Torch RNG 与累计时间，并验证一步中断后续训；普通推理 checkpoint 不含这些训练状态 |
 | API/UE端到端 | PINN侧接口/格式/单位/数学测试完成；服务器/场景由其他成员实施，实际团队消费联调未执行 |
 
 ## 下一步资料清单
 
 请团队后续提供：标准地形/元数据和粗糙度依据；域形状、初始水位/流场、边界分段及水位/流量；R/T_rain/T_end范围；可信参考来源/不确定度；精度、延迟和内存预算；UE的anchor/轴向。资料未齐不阻止阅读和运行合成流程，但阻止民雄正式验收。
 
-当前没有后台长训练或服务需要维持。所有代码与文档在仓库中，生成模型/图片/CSV位于被git忽略的outputs；未自动提交、推送或发布。
+生成模型、图片和 CSV 位于被 git 忽略的 `outputs/`。v6 训练与审核状态必须以当次输出报告为准；只有完整专家包通过后才能部署到 `models/minxiong/experts/`，不能仅复制 manifest。

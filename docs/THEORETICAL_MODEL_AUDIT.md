@@ -1,5 +1,7 @@
 # Theoretical PINN improvement audit
 
+> Historical audit: the measurements below are the rejected pre-v6 0.5–700 mm/hr runs. The required well-balanced formulation has since been implemented for a new low/medium/high 0–800 mm/hr v6 workflow, but that workflow remains experimental until its three physics reports and two overlap audits all pass. The published v4 checkpoint remains the GUI fallback in the meantime.
+
 ## Outcome
 
 The published v4 checkpoint remains the default model. No expanded 0.5–700 mm/hr experiment passed all strict physics gates, so no experimental checkpoint replaced it.
@@ -29,4 +31,4 @@ Gates: test mean PDE ≤ 0.02, worst PDE ≤ 0.1, test mean mass ≤ 0.01 and wo
 
 The experimental finite-volume momentum residual uses midpoint face fluxes and a centre bed-slope source. On steep terrain and wet/dry fronts this is not a well-balanced discretization: pressure flux and terrain source do not cancel exactly for lake-at-rest states. That creates an irreducible residual which longer optimization cannot fix safely.
 
-The next numerical formulation must implement hydrostatic reconstruction or an equivalent well-balanced conservative weak form, test lake-at-rest with wet/dry shorelines, and only then retrain rain-band experts. Thresholds must not be relaxed merely to publish a 700 mm/hr range.
+The v6 code now implements Audusse hydrostatic reconstruction with HLL flux and automated lake-at-rest, wet/dry, zero-rain and uniform-rain tests before retraining rain-band experts. It also adds terrain/time features, hard storage projection, exact resumable state and strict overlap auditing. Those implementation tests do not retroactively make the failed runs above pass, and thresholds must not be relaxed merely to publish an 800 mm/hr range.

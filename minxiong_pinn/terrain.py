@@ -44,6 +44,10 @@ class MaskedRasterTerrain:
         self.active_rows, self.active_cols = np.nonzero(mask)
         self.active_count = int(mask.sum())
         self.active_area_m2 = self.active_count * self.dx * self.dy
+        # Stable ordering makes equal-population elevation strata reproducible
+        # without ever consulting NoData values.
+        self._elevation_order = np.argsort(
+            self.z[self.active_rows, self.active_cols], kind="stable")
         self.zx, self.zy = self._local_slopes()
         active_slope = np.hypot(self.zx[mask], self.zy[mask])
         cap = max(float(np.percentile(active_slope, 99)), 1e-12)
@@ -113,6 +117,71 @@ class MaskedRasterTerrain:
         x = west + (cols + .5 + jx) * self.dx
         y = north - (rows + .5 + jy) * self.dy
         return np.column_stack((x, y))
+
+    def sample_mass_points(self, rng: np.random.Generator, count: int, *,
+                           strata: int = 16, jitter: bool = True):
+        """Sample all elevation quantiles and return area-mean weights.
+
+        Active cells are divided into nearly equal-population elevation
+        strata. At least one point is drawn from each retained stratum, so
+        low-lying wet cells cannot disappear from a volume audit. The returned
+        Horvitz--Thompson weights account for stratum population and sample
+        allocation and always sum to one. Sampling is without replacement
+        whenever a stratum has enough cells; oversized requests fall back to
+        replacement only within the affected stratum.
+        """
+        try:
+            count_value = float(count)
+        except (TypeError, ValueError):
+            count_value = float("nan")
+        try:
+            strata_value = float(strata)
+        except (TypeError, ValueError):
+            strata_value = float("nan")
+        if (isinstance(count, (bool, np.bool_)) or not np.isfinite(count_value) or
+                not count_value.is_integer() or count_value <= 0):
+            raise ValueError("mass sample count must be a positive integer")
+        if (isinstance(strata, (bool, np.bool_)) or not np.isfinite(strata_value) or
+                not strata_value.is_integer() or strata_value <= 0):
+            raise ValueError("mass sampling strata must be a positive integer")
+        count = int(count_value)
+        strata = min(int(strata_value), count, self.active_count)
+        groups = np.array_split(self._elevation_order, strata)
+        sizes = np.asarray([len(group) for group in groups], dtype=np.int64)
+
+        # Reserve one draw per stratum, then distribute remaining draws in
+        # proportion to the exact stratum populations using largest remainder.
+        allocation = np.ones(strata, dtype=np.int64)
+        remaining = count - strata
+        if remaining:
+            ideal = remaining * sizes / sizes.sum()
+            extra = np.floor(ideal).astype(np.int64)
+            allocation += extra
+            leftover = remaining - int(extra.sum())
+            if leftover:
+                remainders = ideal - extra
+                winners = np.argsort(-remainders, kind="stable")[:leftover]
+                allocation[winners] += 1
+
+        active_indexes, weights = [], []
+        for group, population, samples in zip(groups, sizes, allocation):
+            selected = group[rng.choice(population, size=samples,
+                                        replace=samples > population)]
+            active_indexes.append(selected)
+            weights.append(np.full(samples, population / (self.active_count * samples),
+                                   dtype=np.float64))
+        indexes = np.concatenate(active_indexes)
+        area_weights = np.concatenate(weights)
+        order = rng.permutation(count)
+        indexes, area_weights = indexes[order], area_weights[order]
+
+        rows, cols = self.active_rows[indexes], self.active_cols[indexes]
+        west, _, _, north = self.bounds
+        jx = rng.uniform(-.499, .499, count) if jitter else np.zeros(count)
+        jy = rng.uniform(-.499, .499, count) if jitter else np.zeros(count)
+        xy = np.column_stack((west + (cols + .5 + jx) * self.dx,
+                              north - (rows + .5 + jy) * self.dy))
+        return xy, area_weights
 
     def sample_boundary(self, rng: np.random.Generator, count: int):
         indexes = rng.integers(0, len(self.boundary_xy), size=count)

@@ -67,19 +67,42 @@ def extract_events(path: str | Path, *, minimum_total_mm: float = .5):
     return events
 
 
-def add_design_events(events, intensities_mm_hr, durations_hr):
-    """Add a deterministic parameter grid without pretending it was observed."""
+def add_design_events(events, intensities_mm_hr, durations_hr, *,
+                      validation_markers=(3,), test_markers=(7,)):
+    """Add a deterministic parameter grid without pretending it was observed.
+
+    Zero intensity is a valid dry-state boundary. Durations remain strictly
+    positive. Domain edges always train; marker sets hold out complete
+    interior scenarios for independent validation and testing.
+    """
+    intensities_mm_hr = [float(value) for value in intensities_mm_hr]
+    durations_hr = [float(value) for value in durations_hr]
+    if not intensities_mm_hr or not durations_hr:
+        raise ValueError("design rainfall intensities and durations must not be empty")
+    if any(not np.isfinite(value) or value < 0 for value in intensities_mm_hr):
+        raise ValueError("design rainfall intensity must be finite and nonnegative")
+    if any(not np.isfinite(value) or value <= 0 for value in durations_hr):
+        raise ValueError("design rainfall duration must be finite and positive")
+    if intensities_mm_hr != sorted(set(intensities_mm_hr)):
+        raise ValueError("design rainfall intensities must be unique and increasing")
+    if durations_hr != sorted(set(durations_hr)):
+        raise ValueError("design rainfall durations must be unique and increasing")
+    validation_markers = frozenset(int(value) for value in validation_markers)
+    test_markers = frozenset(int(value) for value in test_markers)
+    valid_markers = set(range(10))
+    if (not validation_markers <= valid_markers or not test_markers <= valid_markers or
+            validation_markers & test_markers):
+        raise ValueError("validation/test markers must be disjoint integers from 0 to 9")
     result = list(events)
     for i, intensity in enumerate(intensities_mm_hr):
         for j, hours in enumerate(durations_hr):
-            if intensity <= 0 or hours <= 0:
-                raise ValueError("design rainfall intensity and duration must be positive")
             # Domain edges remain training cases so the checkpoint's supported
             # rectangle is actually constrained. Interior combinations provide
             # complete held-out scenarios.
             edge = i in {0, len(intensities_mm_hr) - 1} or j in {0, len(durations_hr) - 1}
             marker = (i * 17 + j * 31) % 10
-            split = "train" if edge else "validation" if marker == 3 else "test" if marker == 7 else "train"
+            split = ("train" if edge else "validation" if marker in validation_markers
+                     else "test" if marker in test_markers else "train")
             result.append({"event_id": f"design_r{i:02d}_d{j:02d}", "start": "",
                            "duration_s": float(hours * 3600),
                            "mean_intensity_mm_hr": float(intensity),

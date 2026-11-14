@@ -60,7 +60,9 @@ def _deduplicated_times(simulation_s, interval_s, rain_duration_s):
 def build_prediction_request(*, rainfall_mm_hr, rain_duration_value, rain_duration_unit,
                              simulation_value, simulation_unit, interval_value, interval_unit,
                              checkpoint, model_time_s, active_cells, max_frames=500):
-    rainfall = _number(rainfall_mm_hr, "平均雨势")
+    # The checkpoint range remains authoritative: expanded models may accept
+    # the exact dry-state boundary, while legacy checkpoints still reject it.
+    rainfall = _number(rainfall_mm_hr, "平均雨势", positive=False)
     rain_s = _seconds(rain_duration_value, rain_duration_unit, "降雨时长")
     simulation_s = _seconds(simulation_value, simulation_unit, "模拟总时长")
     interval_s = _seconds(interval_value, interval_unit, "输出间隔")

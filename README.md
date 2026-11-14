@@ -10,19 +10,14 @@
 
 1. 用 VS Code 的“打开文件夹”打开整个仓库，安装推荐的 **Python** 和 **Python Debugger** 扩展。
 2. 首次使用按 `Ctrl+Shift+P`，选 **Python: Create Environment → Venv → Python 3.12 → requirements.txt**。已有`.venv`则使用 **Python: Select Interpreter** 选择它。这一步由VS Code安装依赖，不需要手动在Windows终端输入运行命令。
-3. 打开`configs/vscode_run.json`，手动编辑`rainfall_mm_hr`和`duration`（unit支持`s`/`min`/`h`）。当前固定地形由`configs/fixed_terrain.json`中的CSV路径指定，每次读取同一文件，不随机生成。
-4. 按 **F5**，选择 **PINN：固定地形、手动雨情与训练报告**。日志在VS Code“调试控制台”显示，结束后打开HTML报告；也可在`outputs/vscode/<本次运行>/training_results_report.html`找到它。
+3. 按 **F5**，选择 **民雄 PINN：用户输入预测**。
+4. 在图形窗口直接填写平均雨势、降雨时长、模拟总时长和输出间隔，选择输出目录后开始预测；日常预测不需要修改 JSON。
 
-```json
-"rainfall_mm_hr": 60,
-"duration": {"value": 0.05, "unit": "min"}
-```
+民雄入口固定读取 `data/minxiong/裁剪后民雄.tif`。有效格由 GeoTIFF 掩膜决定，不会用“高程小于或等于 0”判断 NoData，所以含负高程的洼地仍是有效地形。随机性只用于训练采样，不会随机生成或改变 DEM。
 
-示例是60mm/hr、降雨3秒、总模拟6秒的短流程测试，不能当作实际暴雨设定。固定起伏CSV是人工示例，并非民雄DEM。随机的是训练采样点，不是地形。训练用的多雨情列表在`fixed_terrain.json`中明确列出；上面的手填雨情用于本次预测，不会静默改写训练情境或外推范围。
+GUI 会读取实际已批准模型的范围。仓库当前正式回退模型仍是 v4（0.5–23 mm/hr、降雨 1–37 小时、模拟最长 43 小时）。新的 v6 三专家方案目标是 0–800 mm/hr、降雨 1–24 小时、模拟最长 36 小时；只有三个专家各自通过物理门槛且两个重叠区审核都通过后才会启用。未批准、文件缺失或审核失败时 GUI 会继续使用 v4，不会把实验权重冒充正式模型。详细操作见[民雄 VS Code 使用指南](docs/MINXIONG_VSCODE_GUIDE.md)。
 
-`action`可选`train_and_predict`、`train`、`predict`。首次用默认训练+预测；之后仅改雨势时改成`predict`，将`model_dir`填为上次`training/model`的路径，避免重复训练。超出模型训练/验证范围的雨势会报错，需要先定义新范围并重新训练。详细图形操作、文件设置及报告说明见[VS Code使用指南](docs/VSCODE_GUIDE.md)。
-
-报告同时提供自包含HTML和Markdown，汇总固定地形/指纹、手动雨情、迭代/Loss、PDE/IC/BC、参考误差（若有）、水量、图表和异常。训练完成与模型验收分开列出，无参考时明确“尚未完成外部验证”。Windows兼容分支有单元测试，本实例的实际运行验证仍在Linux，未声称已在原生Windows上实测。
+原来的 **PINN：固定地形、手动雨情与训练报告** 是 synthetic 开发演示，仍可用于检查通用流程，但不是民雄日常预测入口。本实例实际验证环境为 Linux，尚未宣称在原生 Windows 实机完成训练性能验证。
 
 ## 安装与检查
 
@@ -37,6 +32,19 @@ MPLCONFIGDIR=/tmp/flood-pinn-mpl XDG_CACHE_HOME=/tmp/flood-pinn-cache .venv/bin/
 ```
 
 `requirements-cpu.lock`固定本实例已使用的依赖版本；不是对所有Python/OS/GPU组合的支持声明。一般依赖范围见`pyproject.toml`；需要验证其他投影CRS可安装可选`crs`依赖，PINN不做重投影。
+
+## 0–800 mm/hr 三专家训练与验收
+
+v6 把雨势拆成 low（0–50）、medium（30–300）和 high（200–800 mm/hr）三个专家；降雨时长为 1–24 小时，物理时域为 36 小时。配置在 `configs/minxiong_experts_0_800.json`。这是待训练及待验收的研究方案，文档中的目标范围不代表模型已经通过。
+
+```bash
+.venv/bin/python train_minxiong_experts.py configs/minxiong_experts_0_800.json
+.venv/bin/python audit_minxiong_experts.py configs/minxiong_experts_0_800.json
+```
+
+训练每 50 步原子保存 `training_state.pt`，可恢复模型、优化器、最佳权重、历史、NumPy/Torch 随机状态和累计时间；地形、事件或关键配置不一致时会拒绝误续训。审核只有在三个专家的 PDE、连续方程、封闭边界法向速度和水量门槛，以及 30–50、200–300 mm/hr 重叠区一致性与“训练锚点/正式全 DEM 归一化”偏差门槛全部通过后，才生成批准用 `manifest.json`。
+
+发布时必须把审核通过的整个专家包（`manifest.json`、`low/`、`medium/`、`high/` 检查点及审核证据）一起部署到 `models/minxiong/experts/`；不能只复制 manifest。若任何门槛失败，应保留失败报告并继续使用 v4。
 
 ## 有限时长合成演示
 
@@ -84,6 +92,6 @@ summary = result.finalize()  # 消费前调用只返回pending
 - 瞬时单位宽流量m²/s、面流量m³/s和区间体积m³严格区分；共享面相消不等于PINN储水严格守恒，余差照实保留。
 - 当前实现完整规则矩形网格、明确干初始和四壁条件。真实开放边界、初始积水、乡界掩膜/内部障碍尚未实现，相关配置会报错；不能当成民雄已适用。
 - 未包含建筑阻水、入渗、地下排水、源追踪；原FV仍仅用于Case A回归，不是民雄全域可信参考。
-- 完整训练恢复、通用GPU性能验证、真实API/UE联调未完成；当前保存的推理checkpoint不等于可精确续训的optimizer/RNG快照。
+- v6 专家训练已支持 optimizer、最佳权重、历史、NumPy/Torch RNG 与累计时间的精确断点恢复；通用GPU性能验证和真实API/UE联调仍未完成。普通推理 checkpoint 与 `training_state.pt` 用途不同，不能相互替代。
 
 详见[实现与验证状态](docs/IMPLEMENTATION_STATUS.md)、[团队接口](docs/TEAM_INTERFACE.md)、[FV验证证据](docs/reference_validation.md)、[批准的设计](docs/design_v0.2.md)。

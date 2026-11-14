@@ -9,7 +9,8 @@ import sys
 import threading
 import uuid
 
-from .predict import load_model, predict
+from .expert_bundle import load_preferred_model
+from .predict import predict
 from .terrain import MaskedRasterTerrain
 from .user_input import build_prediction_request
 
@@ -17,6 +18,7 @@ from .user_input import build_prediction_request
 ROOT = Path(__file__).resolve().parents[1]
 TERRAIN_PATH = ROOT / "data" / "minxiong" / "裁剪后民雄.tif"
 MODEL_PATH = ROOT / "models" / "minxiong" / "model.pt"
+EXPERT_MANIFEST_PATH = ROOT / "models" / "minxiong" / "experts" / "manifest.json"
 DEFAULT_OUTPUT_ROOT = ROOT / "outputs" / "minxiong" / "user_predictions"
 
 
@@ -82,7 +84,8 @@ class PredictionApp:
     def _load_backend(self):
         try:
             terrain = MaskedRasterTerrain(TERRAIN_PATH, manning_n=.03)
-            model, checkpoint = load_model(MODEL_PATH, terrain)
+            model, checkpoint = load_preferred_model(
+                EXPERT_MANIFEST_PATH, MODEL_PATH, terrain)
         except Exception as exc:
             self.root.after(0, lambda exc=exc: self._backend_failed(exc))
             return
@@ -103,6 +106,11 @@ class PredictionApp:
                   f"模拟最长 {self.model.scales['time_s'] / 3600:g} 小时。"))
         self.run_button.configure(state="normal")
         self._log(f"固定地形已载入：{self.terrain.active_count:,} 个有效20米网格。")
+        if self.checkpoint.get("expert_bundle"):
+            self._log(f"已启用通过验收的专家模型包：{self.checkpoint['bundle_id']}。")
+        elif self.checkpoint.get("bundle_fallback_reason"):
+            self._log("专家模型包尚未通过完整验收，继续使用官方 v4 模型。")
+            self._log(f"未启用原因：{self.checkpoint['bundle_fallback_reason']}")
         self._log("结果属于当前物理假设下的研究级理论预测。")
         self._refresh_estimate()
 
@@ -146,6 +154,8 @@ class PredictionApp:
         self.run_button.configure(state="disabled"); self.open_button.configure(state="disabled")
         self.progress.configure(maximum=request.frame_count, value=0)
         self._log(f"开始预测：{request.rainfall_mm_hr:g} mm/hr，降雨 {request.rain_duration_s / 3600:g} 小时，{request.frame_count} 帧。")
+        if hasattr(self.model, "model_id_for_rainfall"):
+            self._log(f"本次自动选择专家：{self.model.model_id_for_rainfall(request.rainfall_mm_hr)}。")
         if request.simulation_s < request.rain_duration_s:
             self._log("提示：模拟结束时降雨仍在持续。")
         threading.Thread(target=self._predict_worker, args=(request, target), daemon=True).start()
@@ -175,7 +185,8 @@ class PredictionApp:
         self.last_output = target; self.run_button.configure(state="normal"); self.open_button.configure(state="normal")
         peak_depth = max(frame["max_depth_m"] for frame in summary["frames"])
         peak_speed = max(frame["max_speed_m_s"] for frame in summary["frames"])
-        self._log(f"预测完成：最大水深 {peak_depth:.4g} m，最大流速 {peak_speed:.4g} m/s")
+        model_id = summary.get("model_id", "single")
+        self._log(f"预测完成（模型 {model_id}）：最大水深 {peak_depth:.4g} m，最大流速 {peak_speed:.4g} m/s")
         self._log(f"结果目录：{target}")
         messagebox.showinfo("预测完成", f"已输出 {len(summary['frames'])} 帧。\n\n结果目录：\n{target}")
 
