@@ -19,10 +19,11 @@ DURATION_HR = 6.0
 
 def single_case_setup(physics="finite_volume"):
     if physics not in {"finite_volume", "strong", "strong_finetune",
-                       "strong_local", "strong_local_finetune"}:
+                       "strong_local", "strong_local_finetune",
+                       "strong_local_wide"}:
         raise ValueError(
             "physics must be finite_volume, strong, strong_finetune, strong_local, "
-            "or strong_local_finetune")
+            "strong_local_finetune, or strong_local_wide")
     master = probe_config("uniform_strict")
     expert = master["experts"][0]
     cfg = copy.deepcopy(master["training"])
@@ -37,18 +38,24 @@ def single_case_setup(physics="finite_volume"):
         "expert_name": "single_5mm_hr_6hr",
     })
     if physics in {"strong", "strong_finetune", "strong_local",
-                   "strong_local_finetune"}:
+                   "strong_local_finetune", "strong_local_wide"}:
         cfg.update({
-            "adam_steps": 6000,
+            "adam_steps": 1000 if physics == "strong_local_wide" else 6000,
             "physics_form": "strong",
             "mass_conserving_projection": False,
             "wet_dry_front_fraction": 0.0,
             "expert_name": "single_5mm_hr_6hr_strong",
         })
-    if physics in {"strong_local", "strong_local_finetune"}:
+    if physics in {"strong_local", "strong_local_finetune", "strong_local_wide"}:
         cfg.update({
             "terrain_local_coordinates": True,
             "expert_name": "single_5mm_hr_6hr_strong_local",
+        })
+    if physics == "strong_local_wide":
+        cfg.update({
+            "width": 192,
+            "layers": 8,
+            "expert_name": "single_5mm_hr_6hr_strong_local_wide",
         })
     if physics == "strong_finetune":
         initial = (ROOT / "outputs" / "minxiong" / "v10_probes" /
@@ -104,6 +111,7 @@ def single_case_setup(physics="finite_volume"):
         "strong_finetune": "single_5x6_strong_finetune",
         "strong_local": "single_5x6_strong_local",
         "strong_local_finetune": "single_5x6_strong_local_finetune",
+        "strong_local_wide": "single_5x6_strong_local_wide",
     }
     suffix = suffixes[physics]
     output = ROOT / "outputs" / "minxiong" / "v10_probes" / suffix
