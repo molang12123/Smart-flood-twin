@@ -35,11 +35,18 @@ MPLCONFIGDIR=/tmp/flood-pinn-mpl XDG_CACHE_HOME=/tmp/flood-pinn-cache .venv/bin/
 
 ## 0–800 mm/hr 三专家训练与验收
 
-当前 v9 把雨势拆成 low（0–50）、medium（30–300）和 high（200–800 mm/hr）三个专家；降雨时长为 1–24 小时，物理时域为 36 小时。配置在 `configs/minxiong_experts_0_800.json`。它从全 DEM 静水平衡先验开始，以“初始恒等”的乘法修正逐步开放动态深度，避免解冻瞬间改变水深；低雨少量湿格采用按静水深度加权的条件求积，正式预测再做全 DEM 精确归一化。同时使用独立深度/速度网络、掩膜硬边界、湿干前缘采样及顺序无关的重复验证，并用稳健目标预热后再按严格 MSE 验收。这仍是待训练及待验收的研究方案，文档中的目标范围不代表模型已经通过。
+当前 v9 把雨势拆成 low（0–50）、medium（30–300）和 high（200–800 mm/hr）三个专家；降雨时长为 1–24 小时，物理时域为 36 小时。配置在 `configs/minxiong_experts_0_800.json`。v9 low 已完成 6000 步，但严格连续方程门槛失败，因此 medium/high 未启动、专家包也未获批准；范围目标不代表模型已经可用。失败证据保存在 `outputs/minxiong/experts_wb_0_800_v9/low/`。当前先用可重复的 800 步 v10 low 消融比较纯质量守恒均匀基底与弱静水先验，并对深度/速度网络独立裁剪梯度，筛选通过后才会改动正式三专家方案。
 
 ```bash
 .venv/bin/python train_minxiong_experts.py configs/minxiong_experts_0_800.json
 .venv/bin/python audit_minxiong_experts.py configs/minxiong_experts_0_800.json
+```
+
+v10 诊断短跑（研究输出，不能部署）：
+
+```bash
+.venv/bin/python probe_minxiong_low.py uniform
+.venv/bin/python probe_minxiong_low.py hydro90
 ```
 
 训练每 50 步原子保存 `training_state.pt`，可恢复模型、优化器、最佳权重、历史、NumPy/Torch 随机状态和累计时间；地形、事件或关键配置不一致时会拒绝误续训。当前物理验收控制体为 50% 湿干前缘重点抽样、50% 有效内部格均匀抽样，报告会明确记录，并非纯面积均匀误差。审核只有在三个专家的 PDE、连续方程、封闭边界法向速度和水量门槛，以及 30–50、200–300 mm/hr 重叠区一致性与“训练锚点/正式全 DEM 归一化”偏差门槛全部通过后，才生成批准用 `manifest.json`。

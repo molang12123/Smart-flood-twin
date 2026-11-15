@@ -10,7 +10,7 @@ import torch
 from minxiong_pinn.model import ConditionalFloodPINN
 from minxiong_pinn.predict import load_model
 from minxiong_pinn.terrain import MaskedRasterTerrain
-from minxiong_pinn.training import _scheduled_hydrostatic_blend
+from minxiong_pinn.training import _clip_gradient_norms, _scheduled_hydrostatic_blend
 
 
 def _terrain(folder):
@@ -82,6 +82,31 @@ class HardBoundaryModelTests(unittest.TestCase):
             self.assertTrue(all(parameter.grad is None or
                                 torch.count_nonzero(parameter.grad) == 0
                                 for parameter in model.velocity_net.parameters()))
+
+    def test_separate_output_gradient_clipping_does_not_cross_suppress(self):
+        model = ConditionalFloodPINN(
+            _scales(), width=4, layers=1, separate_output_networks=True)
+        for parameter in model.depth_net.parameters():
+            parameter.grad = torch.full_like(parameter, 30.)
+        for parameter in model.velocity_net.parameters():
+            parameter.grad = torch.full_like(parameter, 40.)
+        total, depth, velocity = _clip_gradient_norms(model, {
+            "gradient_clip": 10.,
+            "separate_output_gradient_clipping": True,
+            "depth_gradient_clip": 2.,
+            "velocity_gradient_clip": 3.,
+        })
+        self.assertAlmostEqual(total, (depth ** 2 + velocity ** 2) ** .5)
+        self.assertGreater(depth, 2.)
+        self.assertGreater(velocity, 3.)
+        depth_after = torch.sqrt(sum(
+            parameter.grad.square().sum()
+            for parameter in model.depth_net.parameters()))
+        velocity_after = torch.sqrt(sum(
+            parameter.grad.square().sum()
+            for parameter in model.velocity_net.parameters()))
+        self.assertLessEqual(float(depth_after), 2.00001)
+        self.assertLessEqual(float(velocity_after), 3.00001)
 
     def test_hard_boundary_requires_a_terrain(self):
         with self.assertRaisesRegex(ValueError, "terrain is required"):

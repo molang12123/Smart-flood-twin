@@ -3,12 +3,28 @@ from pathlib import Path
 import unittest
 
 from minxiong_pinn.rainfall import add_design_events
+from probe_minxiong_low import probe_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class ExpandedExpertDomainTests(unittest.TestCase):
+    def test_v10_probes_are_short_isolated_low_expert_runs(self):
+        uniform = probe_config("uniform")
+        hydro90 = probe_config("hydro90")
+        for name, config in (("uniform", uniform), ("hydro90", hydro90)):
+            self.assertEqual(len(config["experts"]), 1)
+            self.assertEqual(config["experts"][0]["name"], "low")
+            self.assertEqual(config["training"]["adam_steps"], 800)
+            self.assertTrue(config["training"]["separate_output_gradient_clipping"])
+            self.assertIn(f"v10_probes/{name}", config["output_root"])
+        self.assertFalse(uniform["training"]["hydrostatic_depth_baseline"])
+        self.assertTrue(hydro90["training"]["hydrostatic_depth_baseline"])
+        self.assertEqual(hydro90["training"]["hydrostatic_uniform_floor"], .9)
+        with self.assertRaisesRegex(ValueError, "variant"):
+            probe_config("unknown")
+
     def test_expanded_config_covers_requested_domain(self):
         config = json.loads((ROOT / "configs/minxiong_experts_0_800.json").read_text())
         self.assertEqual(config["durations_hr"], [1, 2, 3, 6, 12, 18, 24])

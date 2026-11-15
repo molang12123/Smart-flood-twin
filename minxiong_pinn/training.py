@@ -370,6 +370,29 @@ def _scheduled_hydrostatic_blend(cfg, step):
     return target * progress
 
 
+def _clip_gradient_norms(model, cfg):
+    """Clip independent output networks without one suppressing the other."""
+    limit = float(cfg["gradient_clip"])
+    if not math.isfinite(limit) or limit <= 0:
+        raise ValueError("gradient_clip must be positive and finite")
+    if not cfg.get("separate_output_gradient_clipping", False):
+        total = torch.nn.utils.clip_grad_norm_(model.parameters(), limit)
+        return float(total), None, None
+    if not getattr(model, "separate_output_networks", False):
+        raise ValueError(
+            "separate output gradient clipping requires separate output networks")
+    depth_limit = float(cfg.get("depth_gradient_clip", limit))
+    velocity_limit = float(cfg.get("velocity_gradient_clip", limit))
+    if (not math.isfinite(depth_limit) or depth_limit <= 0 or
+            not math.isfinite(velocity_limit) or velocity_limit <= 0):
+        raise ValueError("depth and velocity gradient clips must be positive and finite")
+    depth = float(torch.nn.utils.clip_grad_norm_(
+        model.depth_net.parameters(), depth_limit))
+    velocity = float(torch.nn.utils.clip_grad_norm_(
+        model.velocity_net.parameters(), velocity_limit))
+    return math.hypot(depth, velocity), depth, velocity
+
+
 def _atomic_torch_save(value, path):
     path = Path(path); temporary = path.with_name(path.name + ".tmp")
     torch.save(value, temporary); temporary.replace(path)
@@ -518,14 +541,17 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
         if depth_warmup or depth_gradient_scale < 1.:
             scale = 0. if depth_warmup else depth_gradient_scale
             model.scale_depth_gradients(scale)
-        grad = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["gradient_clip"])
+        grad, depth_grad, velocity_grad = _clip_gradient_norms(model, cfg)
         optimizer.step()
         record = {"step": step, "elapsed_s": time.perf_counter() - started,
-                  "total_loss": float(total.detach()), "gradient_norm": float(grad),
+                  "total_loss": float(total.detach()), "gradient_norm": grad,
                   "depth_warmup": depth_warmup,
                   "robust_pde_warmup": robust_pde,
                   "hydrostatic_learned_blend": current_blend,
                   **{f"{k}_loss": float(v.detach()) for k, v in parts.items()}}
+        if depth_grad is not None:
+            record["depth_gradient_norm"] = depth_grad
+            record["velocity_gradient_norm"] = velocity_grad
         history.append(record)
         validate = step == 1 or step % cfg["validation_interval"] == 0 or step == cfg["adam_steps"]
         if validate:
@@ -615,6 +641,12 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
               "baseline_initialization": bool(cfg.get("baseline_initialization", False)),
               "depth_warmup_steps": int(cfg.get("depth_warmup_steps", 0)),
               "depth_gradient_scale": float(cfg.get("depth_gradient_scale", 1.)),
+              "separate_output_gradient_clipping": bool(
+                  cfg.get("separate_output_gradient_clipping", False)),
+              "depth_gradient_clip": float(cfg.get(
+                  "depth_gradient_clip", cfg["gradient_clip"])),
+              "velocity_gradient_clip": float(cfg.get(
+                  "velocity_gradient_clip", cfg["gradient_clip"])),
               "hydrostatic_learned_blend": float(model.hydrostatic_learned_blend),
               "evaluation_sampling": {
                   "wet_dry_front_fraction": float(cfg.get("wet_dry_front_fraction", 0.)),

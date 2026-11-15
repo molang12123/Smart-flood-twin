@@ -13,9 +13,9 @@ from minxiong_pinn.training import train
 ROOT = Path(__file__).resolve().parent
 
 
-def main(config_path="configs/minxiong_experts_0_800.json"):
-    path = (ROOT / config_path).resolve()
-    master = json.loads(path.read_text(encoding="utf-8-sig")); base = path.parent
+def run_expert_config(master, base):
+    """Train an already loaded expert configuration relative to ``base``."""
+    base = Path(base).resolve()
     resolve = lambda value: (base / value).resolve()
     terrain = MaskedRasterTerrain(resolve(master["terrain_tif"]), manning_n=master["manning_n"])
     observed = extract_events(resolve(master["rainfall_zip"]))
@@ -76,6 +76,13 @@ def main(config_path="configs/minxiong_experts_0_800.json"):
                "experts": summaries}
     (output_root / "expert_training_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return summary
+
+
+def main(config_path="configs/minxiong_experts_0_800.json"):
+    path = (ROOT / config_path).resolve()
+    master = json.loads(path.read_text(encoding="utf-8-sig"))
+    return run_expert_config(master, path.parent)
 
 
 if __name__ == "__main__":
