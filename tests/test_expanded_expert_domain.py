@@ -4,6 +4,7 @@ import unittest
 
 from minxiong_pinn.rainfall import add_design_events
 from probe_minxiong_low import probe_config
+from probe_minxiong_single_case import single_case_setup
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,8 @@ class ExpandedExpertDomainTests(unittest.TestCase):
         self.assertEqual(uniform_strict["training"]["learning_rate"], .00003)
         with self.assertRaisesRegex(ValueError, "variant"):
             probe_config("unknown")
+        with self.assertRaisesRegex(ValueError, "physics"):
+            single_case_setup("unknown")
 
     def test_expanded_config_covers_requested_domain(self):
         config = json.loads((ROOT / "configs/minxiong_experts_0_800.json").read_text())

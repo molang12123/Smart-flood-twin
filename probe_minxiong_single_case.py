@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 from pathlib import Path
 
 from minxiong_pinn.terrain import MaskedRasterTerrain
@@ -16,7 +17,9 @@ RAINFALL_MM_HR = 5.0
 DURATION_HR = 6.0
 
 
-def single_case_setup():
+def single_case_setup(physics="finite_volume"):
+    if physics not in {"finite_volume", "strong"}:
+        raise ValueError("physics must be finite_volume or strong")
     master = probe_config("uniform_strict")
     expert = master["experts"][0]
     cfg = copy.deepcopy(master["training"])
@@ -30,6 +33,13 @@ def single_case_setup():
         "final_evaluation_repeats": 3,
         "expert_name": "single_5mm_hr_6hr",
     })
+    if physics == "strong":
+        cfg.update({
+            "physics_form": "strong",
+            "mass_conserving_projection": False,
+            "wet_dry_front_fraction": 0.0,
+            "expert_name": "single_5mm_hr_6hr_strong",
+        })
     terrain = MaskedRasterTerrain(
         (BASE_CONFIG.parent / master["terrain_tif"]).resolve(),
         manning_n=master["manning_n"])
@@ -56,16 +66,17 @@ def single_case_setup():
         "duration_s": DURATION_HR * 3600.,
         "total_mm": RAINFALL_MM_HR * DURATION_HR,
     } for split in ("train", "validation", "test")]
-    output = ROOT / "outputs" / "minxiong" / "v10_probes" / "single_5x6"
+    suffix = "single_5x6" if physics == "finite_volume" else "single_5x6_strong"
+    output = ROOT / "outputs" / "minxiong" / "v10_probes" / suffix
     return terrain, events, cfg, output
 
 
-def main():
-    terrain, events, cfg, output = single_case_setup()
+def main(physics="finite_volume"):
+    terrain, events, cfg, output = single_case_setup(physics)
     _, report = train(terrain, events, cfg, output)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return report
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1] if len(sys.argv) > 1 else "finite_volume")
