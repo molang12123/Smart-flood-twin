@@ -22,6 +22,9 @@ class ExpandedExpertDomainTests(unittest.TestCase):
         self.assertTrue(config["training"]["hydrostatic_depth_baseline"])
         self.assertGreater(config["training"]["hydrostatic_learned_blend"], 0.)
         self.assertLessEqual(config["training"]["hydrostatic_learned_blend"], 1.)
+        self.assertEqual(config["training"]["hydrostatic_correction_mode"],
+                         "multiplicative")
+        self.assertGreater(config["training"]["hydrostatic_uniform_floor"], 0.)
         self.assertGreater(config["training"]["robust_pde_warmup_steps"], 0)
         self.assertGreater(config["training"]["fv_time_slices"], 0)
         ranges = [(item["intensities_mm_hr"][0], item["intensities_mm_hr"][-1])

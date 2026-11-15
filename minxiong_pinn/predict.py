@@ -29,6 +29,8 @@ def load_model(path, terrain):
         hard_mask_boundary=checkpoint.get("hard_mask_boundary", False),
         hydrostatic_depth_baseline=checkpoint.get("hydrostatic_depth_baseline", False),
         hydrostatic_learned_blend=checkpoint.get("hydrostatic_learned_blend", 1.0),
+        hydrostatic_correction_mode=checkpoint.get("hydrostatic_correction_mode", "convex"),
+        hydrostatic_uniform_floor=checkpoint.get("hydrostatic_uniform_floor", 0.0),
     )
     if checkpoint.get("terrain_features", False):
         expected_version = checkpoint.get("terrain_feature_version")
@@ -87,7 +89,9 @@ def predict(model, checkpoint, terrain, rainfall_mm_hr, duration_s, times_s, out
                     p = np.empty((stop - start, 5)); p[:, :2] = xy[start:stop]
                     p[:, 2] = t; p[:, 3] = rainfall_mm_hr / 3_600_000.; p[:, 4] = duration_s
                     with torch.no_grad():
-                        factors = prediction_model.depth_factor(
+                        factor_method = getattr(prediction_model, "projection_factor",
+                                                prediction_model.depth_factor)
+                        factors = factor_method(
                             torch.as_tensor(p, dtype=torch.float64))
                     factor_sum += float(factors.to(torch.float64).sum())
                 factor_mean = factor_sum / terrain.active_count

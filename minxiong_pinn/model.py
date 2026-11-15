@@ -134,7 +134,9 @@ class ConditionalFloodPINN(nn.Module):
                  separate_output_networks: bool = False,
                  hard_mask_boundary: bool = False,
                  hydrostatic_depth_baseline: bool = False,
-                 hydrostatic_learned_blend: float = 1.0):
+                 hydrostatic_learned_blend: float = 1.0,
+                 hydrostatic_correction_mode: str = "convex",
+                 hydrostatic_uniform_floor: float = 0.0):
         super().__init__()
         self.scales = {k: float(v) for k, v in scales.items()}
         self.log_conditions = bool(log_conditions)
@@ -150,8 +152,14 @@ class ConditionalFloodPINN(nn.Module):
         self.hard_mask_boundary = bool(hard_mask_boundary)
         self.hydrostatic_depth_baseline = bool(hydrostatic_depth_baseline)
         self.hydrostatic_learned_blend = float(hydrostatic_learned_blend)
+        self.hydrostatic_correction_mode = str(hydrostatic_correction_mode)
+        self.hydrostatic_uniform_floor = float(hydrostatic_uniform_floor)
         if not 0. <= self.hydrostatic_learned_blend <= 1.:
             raise ValueError("hydrostatic learned blend must be between zero and one")
+        if self.hydrostatic_correction_mode not in {"convex", "multiplicative"}:
+            raise ValueError("hydrostatic correction mode must be convex or multiplicative")
+        if not 0. <= self.hydrostatic_uniform_floor < 1.:
+            raise ValueError("hydrostatic uniform floor must be in [0, 1)")
         if self.log_conditions and self.log1p_conditions:
             raise ValueError("log_conditions and log1p_conditions are mutually exclusive")
         if (self.terrain_features or self.hard_mask_boundary or
@@ -166,7 +174,16 @@ class ConditionalFloodPINN(nn.Module):
                                  persistent=False)
         if self.hydrostatic_depth_baseline:
             elevation = np.asarray(terrain.z, dtype=np.float64)
-            active = np.sort(elevation[terrain.mask], kind="stable")
+            active_values = elevation[terrain.active_rows, terrain.active_cols]
+            active_order = np.argsort(active_values, kind="stable")
+            active = active_values[active_order]
+            sorted_rows = terrain.active_rows[active_order]
+            sorted_cols = terrain.active_cols[active_order]
+            west, _, _, north = terrain.bounds
+            sorted_xy = np.column_stack((
+                west + (sorted_cols + .5) * terrain.dx,
+                north - (sorted_rows + .5) * terrain.dy,
+            )).astype(np.float64)
             prefix = np.concatenate(([0.], np.cumsum(active, dtype=np.float64)))
             wet_count = np.arange(1, len(active), dtype=np.float64)
             breaks = wet_count * active[1:] - prefix[1:-1]
@@ -176,6 +193,10 @@ class ConditionalFloodPINN(nn.Module):
             self.register_buffer("_elevation_prefix_sum", torch.from_numpy(prefix),
                                  persistent=False)
             self.register_buffer("_elevation_volume_breaks", torch.from_numpy(breaks),
+                                 persistent=False)
+            self.register_buffer("_sorted_active_elevation", torch.from_numpy(active.copy()),
+                                 persistent=False)
+            self.register_buffer("_sorted_active_xy", torch.from_numpy(sorted_xy),
                                  persistent=False)
             self._active_cell_count = int(terrain.active_count)
         if self.terrain_features:
@@ -359,6 +380,12 @@ class ConditionalFloodPINN(nn.Module):
         return (self.hydrostatic_depth_baseline and
                 self.hydrostatic_learned_blend == 0.)
 
+    @property
+    def condition_weighted_mass_projection(self):
+        return (self.mass_conserving_projection and
+                self.hydrostatic_depth_baseline and
+                self.hydrostatic_correction_mode == "multiplicative")
+
     def equilibrium_depth(self, points):
         """Exact full-DEM lake-at-rest depth for accumulated rain volume."""
         if not self.hydrostatic_depth_baseline:
@@ -393,6 +420,30 @@ class ConditionalFloodPINN(nn.Module):
         raw = self._raw_outputs(points)
         return torch.nn.functional.softplus(raw[:, :1]) / math.log(2.)
 
+    def _hydrostatic_base_factor(self, points, equilibrium=None):
+        if equilibrium is None:
+            equilibrium = self.equilibrium_depth(points)
+        precise = points.to(equilibrium.dtype)
+        accumulated = precise[:, 3:4] * torch.minimum(precise[:, 2:3],
+                                                       precise[:, 4:5])
+        ratio = torch.where(accumulated > 0.,
+                            equilibrium / accumulated.clamp_min(
+                                torch.finfo(equilibrium.dtype).tiny),
+                            torch.ones_like(equilibrium))
+        floor = self.hydrostatic_uniform_floor
+        return (1. - floor) * ratio + floor
+
+    def projection_factor(self, points):
+        """Factor whose full-domain mean normalises deployed water depth."""
+        learned = self.depth_factor(points)
+        if (self.hydrostatic_depth_baseline and
+                self.hydrostatic_correction_mode == "multiplicative"):
+            base = self._hydrostatic_base_factor(points).to(learned.dtype)
+            blend = self.hydrostatic_learned_blend
+            modifier = (1. - blend) + blend * learned
+            return base * modifier
+        return learned
+
     def _anchor_factor_means(self, conditions):
         """Compute one fixed-domain factor mean for each (t,R,D) row."""
         groups = len(conditions)
@@ -404,10 +455,67 @@ class ConditionalFloodPINN(nn.Module):
         xy = anchors.repeat(groups, 1)
         repeated_conditions = conditions.repeat_interleave(anchor_count, dim=0)
         anchor_points = torch.cat((xy, repeated_conditions), dim=1)
-        factors = self.depth_factor(anchor_points).reshape(groups, anchor_count)
-        weights = self._mass_anchor_weights.to(device=factors.device,
-                                                dtype=factors.dtype)
-        return (factors * weights[None, :]).sum(dim=1)
+        if (self.hydrostatic_depth_baseline and
+                self.hydrostatic_correction_mode == "multiplicative"):
+            uniform_learned = self.depth_factor(anchor_points).reshape(
+                groups, anchor_count)
+            weights = self._mass_anchor_weights.to(
+                device=uniform_learned.device, dtype=uniform_learned.dtype)
+            uniform_delta = ((uniform_learned - 1.) * weights[None, :]).sum(dim=1)
+            volume_delta = []
+            for condition in conditions:
+                accumulated = float(
+                    condition[1] * torch.minimum(condition[0], condition[2]))
+                if accumulated <= 0.:
+                    volume_delta.append(uniform_delta.new_zeros(()))
+                    continue
+                volume_sum = accumulated * self._active_cell_count
+                wet_count = int(torch.searchsorted(
+                    self._elevation_volume_breaks,
+                    self._elevation_volume_breaks.new_tensor(volume_sum),
+                    right=True).item()) + 1
+                wet_count = min(wet_count, self._active_cell_count)
+                level = ((volume_sum + float(self._elevation_prefix_sum[wet_count])) /
+                         wet_count)
+                depth_weights = torch.relu(
+                    self._sorted_active_elevation[:wet_count].new_tensor(level) -
+                    self._sorted_active_elevation[:wet_count])
+                positive = torch.nonzero(depth_weights > 0., as_tuple=False)[:, 0]
+                if not len(positive):
+                    volume_delta.append(uniform_delta.new_zeros(()))
+                    continue
+                depth_weights = depth_weights[positive]
+                wet_xy = self._sorted_active_xy[positive]
+                if len(positive) <= anchor_count:
+                    selected_xy = wet_xy
+                    selected_weights = depth_weights / depth_weights.sum()
+                else:
+                    cumulative = torch.cumsum(depth_weights, dim=0)
+                    quantiles = ((torch.arange(anchor_count, device=cumulative.device,
+                                               dtype=cumulative.dtype) + .5) /
+                                 anchor_count * cumulative[-1])
+                    indexes = torch.searchsorted(cumulative, quantiles, right=False)
+                    selected_xy = wet_xy[indexes]
+                    selected_weights = cumulative.new_full((anchor_count,),
+                                                            1. / anchor_count)
+                repeated = condition[None, :].repeat(len(selected_xy), 1)
+                sample_points = torch.cat((selected_xy.to(
+                    device=conditions.device, dtype=conditions.dtype), repeated), dim=1)
+                delta = self.depth_factor(sample_points)[:, 0] - 1.
+                volume_delta.append((delta * selected_weights.to(
+                    device=delta.device, dtype=delta.dtype)).sum())
+            volume_delta = torch.stack(volume_delta)
+            blend = self.hydrostatic_learned_blend
+            floor = self.hydrostatic_uniform_floor
+            # The hydrostatic term is integrated in proportion to water
+            # volume, so a one-cell puddle is represented exactly. Only the
+            # small uniform floor uses the fixed area anchors.
+            return 1. + blend * ((1. - floor) * volume_delta +
+                                 floor * uniform_delta)
+        learned = self.depth_factor(anchor_points).reshape(groups, anchor_count)
+        weights = self._mass_anchor_weights.to(device=learned.device,
+                                                dtype=learned.dtype)
+        return (learned * weights[None, :]).sum(dim=1)
 
     def forward(self, points, *, projection_factor_mean=None):
         raw = self._raw_outputs(points)
@@ -419,10 +527,14 @@ class ConditionalFloodPINN(nn.Module):
         depth_factor = torch.nn.functional.softplus(raw[:, :1]) / math.log(2.)
         if projection_factor_mean is not None and not self.mass_conserving_projection:
             raise ValueError("projection_factor_mean requires mass-conserving projection")
-        learned_depth = None
-        if (not self.hydrostatic_depth_baseline or
-                self.hydrostatic_learned_blend > 0.):
-            if self.mass_conserving_projection and len(points):
+        if (self.hydrostatic_depth_baseline and
+                self.hydrostatic_correction_mode == "multiplicative"):
+            equilibrium = self.equilibrium_depth(points).to(raw.dtype)
+            base_factor = self._hydrostatic_base_factor(
+                points, equilibrium.to(torch.float64)).to(raw.dtype)
+            blend = self.hydrostatic_learned_blend
+            combined_factor = base_factor * ((1. - blend) + blend * depth_factor)
+            if self.mass_conserving_projection and len(points) and blend > 0.:
                 conditions = precise[:, 2:5]
                 unique_conditions, inverse = torch.unique(
                     conditions, dim=0, sorted=True, return_inverse=True)
@@ -443,16 +555,47 @@ class ConditionalFloodPINN(nn.Module):
                         factor_means = factor_means.expand(len(unique_conditions))
                     if factor_means.shape != (len(unique_conditions),):
                         raise ValueError("projection_factor_mean must be scalar or one value per condition")
-                denominator = factor_means[inverse, None].clamp_min(torch.finfo(raw.dtype).tiny)
-                learned_depth = accumulated_rain * depth_factor / denominator
+                denominator = factor_means[inverse, None].clamp_min(.05)
             else:
-                learned_depth = accumulated_rain * depth_factor
-        if self.hydrostatic_depth_baseline:
-            equilibrium = self.equilibrium_depth(points).to(raw.dtype)
-            blend = self.hydrostatic_learned_blend
-            h = equilibrium if blend == 0. else (1. - blend) * equilibrium + blend * learned_depth
+                denominator = 1.
+            h = accumulated_rain * combined_factor / denominator
         else:
-            h = learned_depth
+            learned_depth = None
+            if (not self.hydrostatic_depth_baseline or
+                    self.hydrostatic_learned_blend > 0.):
+                if self.mass_conserving_projection and len(points):
+                    conditions = precise[:, 2:5]
+                    unique_conditions, inverse = torch.unique(
+                        conditions, dim=0, sorted=True, return_inverse=True)
+                    if projection_factor_mean is None:
+                        accumulated_by_group = (unique_conditions[:, 1] *
+                                                torch.minimum(unique_conditions[:, 0],
+                                                              unique_conditions[:, 2]))
+                        positive = accumulated_by_group > 0
+                        factor_means = raw.new_ones(len(unique_conditions))
+                        if torch.any(positive):
+                            positive_means = self._anchor_factor_means(unique_conditions[positive])
+                            factor_means = factor_means.index_copy(
+                                0, torch.nonzero(positive, as_tuple=False)[:, 0], positive_means)
+                    else:
+                        factor_means = torch.as_tensor(
+                            projection_factor_mean, dtype=raw.dtype, device=raw.device)
+                        if factor_means.ndim == 0:
+                            factor_means = factor_means.expand(len(unique_conditions))
+                        if factor_means.shape != (len(unique_conditions),):
+                            raise ValueError("projection_factor_mean must be scalar or one value per condition")
+                    denominator = factor_means[inverse, None].clamp_min(
+                        torch.finfo(raw.dtype).tiny)
+                    learned_depth = accumulated_rain * depth_factor / denominator
+                else:
+                    learned_depth = accumulated_rain * depth_factor
+            if self.hydrostatic_depth_baseline:
+                equilibrium = self.equilibrium_depth(points).to(raw.dtype)
+                blend = self.hydrostatic_learned_blend
+                h = (equilibrium if blend == 0. else
+                     (1. - blend) * equilibrium + blend * learned_depth)
+            else:
+                h = learned_depth
         uv = ramp * torch.tanh(raw[:, 1:]) * s["velocity_m_s"]
         if self.wet_velocity_gate:
             wet_gate_depth = s.get("wet_velocity_gate_m", 1e-5)

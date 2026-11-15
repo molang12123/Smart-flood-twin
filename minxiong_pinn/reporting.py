@@ -59,6 +59,7 @@ def generate_report(output_dir: str | Path):
 <img src='data:image/png;base64,{figure_data('history')}'><img src='data:image/png;base64,{figure_data('events')}'>
 <h2>固定地形</h2><pre>{json.dumps(report['terrain'], ensure_ascii=False, indent=2)}</pre>
 <h2>驗收抽樣</h2><pre>{json.dumps(report.get('evaluation_sampling', {}), ensure_ascii=False, indent=2)}</pre>
+<h2>水量約束</h2><p>{report.get('mass_constraint_method', '未記錄')}</p>
 <h2>目前物理假設</h2><ul>{assumptions}</ul>
 <h2>結果邊界</h2><p>目前沒有實測淹水深度、流速或可信水動力模型結果，因此 <b>external flood observation validation = not available</b>。本報告的「通過」只代表設定的 PINN 方程殘差、封閉域邊界與全域水量門檻通過，不代表真實民雄淹水精度已驗證。</p>
 </html>"""

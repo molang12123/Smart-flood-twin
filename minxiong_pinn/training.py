@@ -256,10 +256,12 @@ def _loss(model, terrain, cases, rng, cfg, *, robust_pde=False):
                                   min(points[0, 4], end_s), end_s)))
         for audit_time in audit_times:
             expected = points[0, 3] * min(audit_time, points[0, 4])
-            if getattr(model, "exact_hydrostatic_mass", False):
-                # The water level is solved from every active DEM cell, so its
-                # domain mean is exact by construction. A sparse audit would
-                # be biased when only a few lowest cells are wet.
+            if (getattr(model, "exact_hydrostatic_mass", False) or
+                    getattr(model, "condition_weighted_mass_projection", False)):
+                # The static prior is exact; multiplicative corrections use
+                # hydrostatic-volume-weighted quadrature and exact full-DEM
+                # deployment renormalisation. A sparse area audit is badly
+                # biased when only a few lowest cells are wet.
                 event_mass.append(raw.sum() * 0.)
                 continue
             if cfg.get("stratified_mass_sampling", False) and hasattr(terrain, "sample_mass_points"):
@@ -411,7 +413,9 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
         separate_output_networks=cfg.get("separate_output_networks", False),
         hard_mask_boundary=cfg.get("hard_mask_boundary", False),
         hydrostatic_depth_baseline=cfg.get("hydrostatic_depth_baseline", False),
-        hydrostatic_learned_blend=cfg.get("hydrostatic_learned_blend", 1.0))
+        hydrostatic_learned_blend=cfg.get("hydrostatic_learned_blend", 1.0),
+        hydrostatic_correction_mode=cfg.get("hydrostatic_correction_mode", "convex"),
+        hydrostatic_uniform_floor=cfg.get("hydrostatic_uniform_floor", 0.0))
     if (getattr(model, "mass_conserving_projection", False) and
             cfg.get("physics_form", "strong") != "finite_volume"):
         raise ValueError("mass-conserving projection requires finite_volume physics")
@@ -584,6 +588,8 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                   "hard_mask_boundary": getattr(model, "hard_mask_boundary", False),
                   "hydrostatic_depth_baseline": getattr(model, "hydrostatic_depth_baseline", False),
                   "hydrostatic_learned_blend": getattr(model, "hydrostatic_learned_blend", 1.0),
+                  "hydrostatic_correction_mode": getattr(model, "hydrostatic_correction_mode", "convex"),
+                  "hydrostatic_uniform_floor": getattr(model, "hydrostatic_uniform_floor", 0.0),
                   "terrain_feature_version": (getattr(model, "terrain_feature_metadata", None) or {}).get("version"),
                   "terrain_fingerprint": terrain.fingerprint,
                   "training_rain_domain": {"rainfall_mm_hr": [min(e["mean_intensity_mm_hr"] for e in training), max(e["mean_intensity_mm_hr"] for e in training)],
@@ -617,6 +623,10 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                   "final_evaluation_repeats": int(cfg.get("final_evaluation_repeats", 1)),
                   "description": "configured fraction of control volumes targets elevations near the hydrostatic wet/dry front; the remainder is uniform over valid interior cells",
               },
+              "mass_constraint_method": (
+                  "condition-weighted hydrostatic projection; sparse mass loss is identically zero and deployment uses exact full-DEM renormalization"
+                  if getattr(model, "condition_weighted_mass_projection", False)
+                  else "stratified sampled domain mean"),
               "resumable_checkpoint": str(state_path),
               "assumptions": cfg["assumptions"],
               "external_flood_observation_validation": "not_available",

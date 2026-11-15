@@ -132,6 +132,89 @@ class HardBoundaryModelTests(unittest.TestCase):
         self.assertEqual(_scheduled_hydrostatic_blend(cfg, 300), .5)
         self.assertEqual(_scheduled_hydrostatic_blend(cfg, 1000), .5)
 
+    def test_multiplicative_correction_opens_without_a_depth_jump(self):
+        with tempfile.TemporaryDirectory() as folder:
+            terrain = _terrain(folder)
+            model = ConditionalFloodPINN(
+                _scales(), width=4, layers=1, terrain=terrain,
+                separate_output_networks=True, mass_conserving_projection=True,
+                mass_projection_anchor_points=terrain.active_count,
+                hydrostatic_depth_baseline=True,
+                hydrostatic_learned_blend=0.,
+                hydrostatic_correction_mode="multiplicative",
+                hydrostatic_uniform_floor=.001)
+            model.zero_output_layers()
+            west, _, _, north = terrain.bounds
+            xy = np.column_stack((
+                west + (terrain.active_cols + .5) * terrain.dx,
+                north - (terrain.active_rows + .5) * terrain.dy,
+            ))
+            points = _points(xy)
+            closed = model(points)
+            model.hydrostatic_learned_blend = .5
+            opened = model(points)
+            torch.testing.assert_close(opened, closed, rtol=0, atol=0)
+            factor_mean = model.projection_factor(points).mean()
+            exact = model(points, projection_factor_mean=factor_mean)
+            self.assertAlmostEqual(float(exact[:, 0].mean().detach()), .01,
+                                   places=7)
+
+    def test_hydrostatic_correction_settings_are_validated(self):
+        with tempfile.TemporaryDirectory() as folder:
+            terrain = _terrain(folder)
+            with self.assertRaisesRegex(ValueError, "correction mode"):
+                ConditionalFloodPINN(
+                    _scales(), width=4, layers=1, terrain=terrain,
+                    hydrostatic_depth_baseline=True,
+                    hydrostatic_correction_mode="bad")
+            with self.assertRaisesRegex(ValueError, "uniform floor"):
+                ConditionalFloodPINN(
+                    _scales(), width=4, layers=1, terrain=terrain,
+                    hydrostatic_depth_baseline=True,
+                    hydrostatic_uniform_floor=1.)
+
+    def test_low_rain_projection_uses_the_few_wet_cells(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "large.tif"
+            values = np.arange(400, dtype=np.float32).reshape(20, 20)
+            with rasterio.open(
+                path, "w", driver="GTiff", width=20, height=20, count=1,
+                dtype="float32", crs="EPSG:3826",
+                transform=from_origin(0, 400, 20, 20), nodata=-9999.,
+            ) as dst:
+                dst.write(values, 1)
+            terrain = MaskedRasterTerrain(path, manning_n=.03)
+            scales = dict(_scales())
+            scales.update({"lx": 400., "ly": 400.})
+            model = ConditionalFloodPINN(
+                scales, width=4, layers=1, terrain=terrain,
+                separate_output_networks=True, mass_conserving_projection=True,
+                mass_projection_anchor_points=32, mass_projection_strata=8,
+                hydrostatic_depth_baseline=True,
+                hydrostatic_learned_blend=.5,
+                hydrostatic_correction_mode="multiplicative",
+                hydrostatic_uniform_floor=.001)
+            with torch.no_grad():
+                for parameter in model.parameters():
+                    parameter.zero_()
+                model.depth_net[0].weight[0, 0] = 1.
+                model.depth_net[-1].weight[0, 0] = 1.
+            condition = torch.tensor(
+                [[60., .5 / 3_600_000., 3600.]], dtype=torch.float64)
+            estimated = float(model._anchor_factor_means(condition)[0].detach())
+            west, _, _, north = terrain.bounds
+            xy = np.column_stack((
+                west + (terrain.active_cols + .5) * terrain.dx,
+                north - (terrain.active_rows + .5) * terrain.dy,
+            ))
+            points = np.empty((terrain.active_count, 5), dtype=np.float64)
+            points[:, :2] = xy
+            points[:, 2:] = condition.numpy()
+            exact = float(model.projection_factor(
+                torch.as_tensor(points, dtype=torch.float64)).mean().detach())
+            self.assertLess(abs(estimated - exact) / exact, .005)
+            self.assertTrue(model.condition_weighted_mass_projection)
+
     def test_new_architecture_round_trips_through_checkpoint_loader(self):
         with tempfile.TemporaryDirectory() as folder:
             terrain = _terrain(folder)
@@ -141,7 +224,9 @@ class HardBoundaryModelTests(unittest.TestCase):
                 mass_conserving_projection=True,
                 mass_projection_anchor_points=terrain.active_count,
                 hydrostatic_depth_baseline=True,
-                hydrostatic_learned_blend=0.)
+                hydrostatic_learned_blend=0.,
+                hydrostatic_correction_mode="multiplicative",
+                hydrostatic_uniform_floor=.001)
             checkpoint = {
                 "model_state": model.state_dict(), "scales": _scales(),
                 "width": 4, "layers": 1,
@@ -156,6 +241,8 @@ class HardBoundaryModelTests(unittest.TestCase):
                     model.mass_projection_anchor_fingerprint,
                 "hydrostatic_depth_baseline": True,
                 "hydrostatic_learned_blend": 0.,
+                "hydrostatic_correction_mode": "multiplicative",
+                "hydrostatic_uniform_floor": .001,
             }
             path = Path(folder) / "model.pt"
             torch.save(checkpoint, path)

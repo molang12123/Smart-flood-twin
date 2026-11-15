@@ -84,7 +84,8 @@ def _full_domain_projection(model, full_xy, time_s, rainfall_mm_hr, duration_s,
         for start in range(0, len(full_xy), batch_size):
             xy = full_xy[start:start + batch_size]
             points = _points(xy, time_s, rainfall_mm_hr, duration_s)
-            factors = model.depth_factor(torch.as_tensor(points, dtype=torch.float64))
+            factor_method = getattr(model, "projection_factor", model.depth_factor)
+            factors = factor_method(torch.as_tensor(points, dtype=torch.float64))
             factor_sum += float(factors.to(torch.float64).sum())
     full_mean = factor_sum / len(full_xy)
     if not math.isfinite(full_mean) or full_mean <= 0:
