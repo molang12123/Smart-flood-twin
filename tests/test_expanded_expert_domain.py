@@ -17,6 +17,11 @@ class ExpandedExpertDomainTests(unittest.TestCase):
         self.assertTrue(config["training"]["terrain_features"])
         self.assertTrue(config["training"]["enhanced_time_features"])
         self.assertTrue(config["training"]["mass_conserving_projection"])
+        self.assertTrue(config["training"]["separate_output_networks"])
+        self.assertTrue(config["training"]["hard_mask_boundary"])
+        self.assertTrue(config["training"]["hydrostatic_depth_baseline"])
+        self.assertEqual(config["training"]["hydrostatic_learned_blend"], 0.)
+        self.assertGreater(config["training"]["robust_pde_warmup_steps"], 0)
         self.assertGreater(config["training"]["fv_time_slices"], 0)
         ranges = [(item["intensities_mm_hr"][0], item["intensities_mm_hr"][-1])
                   for item in config["experts"]]

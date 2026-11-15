@@ -35,7 +35,7 @@ MPLCONFIGDIR=/tmp/flood-pinn-mpl XDG_CACHE_HOME=/tmp/flood-pinn-cache .venv/bin/
 
 ## 0–800 mm/hr 三专家训练与验收
 
-v6 把雨势拆成 low（0–50）、medium（30–300）和 high（200–800 mm/hr）三个专家；降雨时长为 1–24 小时，物理时域为 36 小时。配置在 `configs/minxiong_experts_0_800.json`。这是待训练及待验收的研究方案，文档中的目标范围不代表模型已经通过。
+当前 v7 把雨势拆成 low（0–50）、medium（30–300）和 high（200–800 mm/hr）三个专家；降雨时长为 1–24 小时，物理时域为 36 小时。配置在 `configs/minxiong_experts_0_800.json`。它用全 DEM 静水平衡深度先验精确保存累计雨水体积、独立速度网络与掩膜硬边界，并用稳健目标预热后再按严格 MSE 验收。这仍是待训练及待验收的研究方案，文档中的目标范围不代表模型已经通过。
 
 ```bash
 .venv/bin/python train_minxiong_experts.py configs/minxiong_experts_0_800.json

@@ -25,6 +25,10 @@ def load_model(path, terrain):
         mass_projection_anchor_points=checkpoint.get("mass_projection_anchor_points", 512),
         mass_projection_strata=checkpoint.get("mass_projection_strata", 32),
         mass_projection_seed=checkpoint.get("mass_projection_seed", 20261113),
+        separate_output_networks=checkpoint.get("separate_output_networks", False),
+        hard_mask_boundary=checkpoint.get("hard_mask_boundary", False),
+        hydrostatic_depth_baseline=checkpoint.get("hydrostatic_depth_baseline", False),
+        hydrostatic_learned_blend=checkpoint.get("hydrostatic_learned_blend", 1.0),
     )
     if checkpoint.get("terrain_features", False):
         expected_version = checkpoint.get("terrain_feature_version")
@@ -73,7 +77,7 @@ def predict(model, checkpoint, terrain, rainfall_mm_hr, duration_s, times_s, out
     for index, t in enumerate(times_s):
         result = np.empty((terrain.active_count, 3), dtype=np.float32)
         factor_mean = None
-        if getattr(prediction_model, "mass_conserving_projection", False):
+        if getattr(prediction_model, "uses_external_mass_projection", False):
             # Exact whole-domain first pass. The second pass shares this one
             # scalar across chunks, making the result batch/order invariant.
             factor_sum = 0.

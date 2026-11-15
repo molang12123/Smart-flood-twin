@@ -130,7 +130,11 @@ class ConditionalFloodPINN(nn.Module):
                  mass_conserving_projection: bool = False,
                  mass_projection_anchor_points: int = 512,
                  mass_projection_strata: int = 32,
-                 mass_projection_seed: int = 20261113):
+                 mass_projection_seed: int = 20261113,
+                 separate_output_networks: bool = False,
+                 hard_mask_boundary: bool = False,
+                 hydrostatic_depth_baseline: bool = False,
+                 hydrostatic_learned_blend: float = 1.0):
         super().__init__()
         self.scales = {k: float(v) for k, v in scales.items()}
         self.log_conditions = bool(log_conditions)
@@ -142,23 +146,58 @@ class ConditionalFloodPINN(nn.Module):
         self.mass_projection_anchor_points = int(mass_projection_anchor_points)
         self.mass_projection_strata = int(mass_projection_strata)
         self.mass_projection_seed = int(mass_projection_seed)
+        self.separate_output_networks = bool(separate_output_networks)
+        self.hard_mask_boundary = bool(hard_mask_boundary)
+        self.hydrostatic_depth_baseline = bool(hydrostatic_depth_baseline)
+        self.hydrostatic_learned_blend = float(hydrostatic_learned_blend)
+        if not 0. <= self.hydrostatic_learned_blend <= 1.:
+            raise ValueError("hydrostatic learned blend must be between zero and one")
         if self.log_conditions and self.log1p_conditions:
             raise ValueError("log_conditions and log1p_conditions are mutually exclusive")
-        if self.terrain_features:
+        if (self.terrain_features or self.hard_mask_boundary or
+                self.hydrostatic_depth_baseline):
             if terrain is None:
-                raise ValueError("terrain is required when terrain_features is enabled")
-            feature_array, metadata = _terrain_feature_array(terrain)
-            self.register_buffer("_terrain_feature_grid", torch.from_numpy(feature_array),
-                                 persistent=False)
-            self.register_buffer("_terrain_valid_mask", torch.from_numpy(terrain.mask.copy()),
-                                 persistent=False)
+                raise ValueError("terrain is required for terrain features or hard mask boundary")
             west, east, south, north = terrain.bounds
             self._terrain_geometry = (float(west), float(east), float(south), float(north),
                                       float(terrain.dx), float(terrain.dy),
                                       int(terrain.width), int(terrain.height))
+            self.register_buffer("_terrain_valid_mask", torch.from_numpy(terrain.mask.copy()),
+                                 persistent=False)
+        if self.hydrostatic_depth_baseline:
+            elevation = np.asarray(terrain.z, dtype=np.float64)
+            active = np.sort(elevation[terrain.mask], kind="stable")
+            prefix = np.concatenate(([0.], np.cumsum(active, dtype=np.float64)))
+            wet_count = np.arange(1, len(active), dtype=np.float64)
+            breaks = wet_count * active[1:] - prefix[1:-1]
+            breaks = np.maximum.accumulate(np.maximum(breaks, 0.))
+            self.register_buffer("_terrain_elevation_grid", torch.from_numpy(elevation.copy()),
+                                 persistent=False)
+            self.register_buffer("_elevation_prefix_sum", torch.from_numpy(prefix),
+                                 persistent=False)
+            self.register_buffer("_elevation_volume_breaks", torch.from_numpy(breaks),
+                                 persistent=False)
+            self._active_cell_count = int(terrain.active_count)
+        if self.terrain_features:
+            feature_array, metadata = _terrain_feature_array(terrain)
+            self.register_buffer("_terrain_feature_grid", torch.from_numpy(feature_array),
+                                 persistent=False)
             self.terrain_feature_metadata = metadata
         else:
             self.terrain_feature_metadata = None
+        if self.hard_mask_boundary:
+            mask = np.asarray(terrain.mask, dtype=bool)
+            exposed = np.zeros((*mask.shape, 4), dtype=bool)
+            exposed[:, 0, 0] = mask[:, 0]
+            exposed[:, 1:, 0] = mask[:, 1:] & ~mask[:, :-1]
+            exposed[:, -1, 1] = mask[:, -1]
+            exposed[:, :-1, 1] = mask[:, :-1] & ~mask[:, 1:]
+            exposed[0, :, 2] = mask[0, :]
+            exposed[1:, :, 2] = mask[1:, :] & ~mask[:-1, :]
+            exposed[-1, :, 3] = mask[-1, :]
+            exposed[:-1, :, 3] = mask[:-1, :] & ~mask[1:, :]
+            self.register_buffer("_wall_exposed_faces", torch.from_numpy(exposed),
+                                 persistent=False)
         if self.mass_conserving_projection:
             if terrain is None:
                 raise ValueError("terrain is required for mass-conserving projection")
@@ -182,15 +221,23 @@ class ConditionalFloodPINN(nn.Module):
                           (len(TERRAIN_FEATURE_NAMES) if self.terrain_features else 0) +
                           (len(ENHANCED_TIME_FEATURE_NAMES)
                            if self.enhanced_time_features else 0))
-        blocks = [nn.Linear(input_features, width), nn.Tanh()]
-        for _ in range(layers - 1):
-            blocks += [nn.Linear(width, width), nn.Tanh()]
-        blocks.append(nn.Linear(width, 3))
-        self.net = nn.Sequential(*blocks)
-        for layer in self.net:
-            if isinstance(layer, nn.Linear):
-                nn.init.xavier_normal_(layer.weight)
-                nn.init.zeros_(layer.bias)
+        def make_network(outputs):
+            blocks = [nn.Linear(input_features, width), nn.Tanh()]
+            for _ in range(layers - 1):
+                blocks += [nn.Linear(width, width), nn.Tanh()]
+            blocks.append(nn.Linear(width, outputs))
+            network = nn.Sequential(*blocks)
+            for layer in network:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_normal_(layer.weight)
+                    nn.init.zeros_(layer.bias)
+            return network
+
+        if self.separate_output_networks:
+            self.depth_net = make_network(1)
+            self.velocity_net = make_network(2)
+        else:
+            self.net = make_network(3)
 
     def _raw_outputs(self, points):
         if points.ndim != 2 or points.shape[1] != 5:
@@ -249,7 +296,97 @@ class ConditionalFloodPINN(nn.Module):
             temporal_q = torch.stack((log_time, rain_progress, log_post_rain), dim=1)
             q = torch.cat((q, temporal_q), dim=1)
         q = q.to(next(self.parameters()).dtype)
+        if self.separate_output_networks:
+            depth = (q.new_zeros((len(q), 1)) if self.exact_hydrostatic_mass
+                     else self.depth_net(q))
+            return torch.cat((depth, self.velocity_net(q)), dim=1)
         return self.net(q)
+
+    def zero_output_layers(self):
+        """Start from uniform accumulated rain and zero velocity."""
+        layers = ((self.depth_net[-1], self.velocity_net[-1])
+                  if self.separate_output_networks else (self.net[-1],))
+        for layer in layers:
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
+    def scale_depth_gradients(self, scale):
+        """Freeze/attenuate depth independently when the architecture allows it."""
+        scale = float(scale)
+        if self.separate_output_networks:
+            for parameter in self.depth_net.parameters():
+                if parameter.grad is not None:
+                    parameter.grad.mul_(scale)
+            return
+        layer = self.net[-1]
+        if layer.weight.grad is not None:
+            layer.weight.grad[0].mul_(scale)
+        if layer.bias.grad is not None:
+            layer.bias.grad[0].mul_(scale)
+
+    def _wall_velocity_factors(self, points):
+        west, east, south, north, dx, dy, width, height = self._terrain_geometry
+        p = points.to(torch.float64)
+        grid_x = (p[:, 0] - west) / dx
+        grid_y = (north - p[:, 1]) / dy
+        col = torch.floor(grid_x).to(torch.long)
+        row = torch.floor(grid_y).to(torch.long)
+        col = torch.where(p[:, 0] == east, col.new_full((), width - 1), col)
+        row = torch.where(p[:, 1] == south, row.new_full((), height - 1), row)
+        inside = (row >= 0) & (row < height) & (col >= 0) & (col < width)
+        safe_row, safe_col = row.clamp(0, height - 1), col.clamp(0, width - 1)
+        valid = inside & self._terrain_valid_mask[safe_row, safe_col]
+        if not bool(torch.all(valid).item()):
+            raise ValueError("hard-boundary lookup entered a NoData or out-of-domain cell")
+        local_x = (grid_x - col.to(grid_x.dtype)).clamp(0., 1.)
+        local_y = (grid_y - row.to(grid_y.dtype)).clamp(0., 1.)
+        faces = self._wall_exposed_faces[safe_row, safe_col]
+        one = torch.ones_like(local_x)
+        west_gate = torch.where(faces[:, 0], (2. * local_x).clamp(0., 1.), one)
+        east_gate = torch.where(faces[:, 1], (2. * (1. - local_x)).clamp(0., 1.), one)
+        north_gate = torch.where(faces[:, 2], (2. * local_y).clamp(0., 1.), one)
+        south_gate = torch.where(faces[:, 3], (2. * (1. - local_y)).clamp(0., 1.), one)
+        return torch.stack((west_gate * east_gate, north_gate * south_gate), dim=1)
+
+    @property
+    def uses_external_mass_projection(self):
+        return (self.mass_conserving_projection and
+                (not self.hydrostatic_depth_baseline or
+                 self.hydrostatic_learned_blend > 0.))
+
+    @property
+    def exact_hydrostatic_mass(self):
+        return (self.hydrostatic_depth_baseline and
+                self.hydrostatic_learned_blend == 0.)
+
+    def equilibrium_depth(self, points):
+        """Exact full-DEM lake-at-rest depth for accumulated rain volume."""
+        if not self.hydrostatic_depth_baseline:
+            raise ValueError("hydrostatic depth baseline is not enabled")
+        west, east, south, north, dx, dy, width, height = self._terrain_geometry
+        p = points.to(torch.float64)
+        if torch.any(p[:, 2] < 0) or torch.any(p[:, 3] < 0) or torch.any(p[:, 4] <= 0):
+            raise ValueError("hydrostatic baseline requires nonnegative time/rain and positive duration")
+        grid_x = (p[:, 0] - west) / dx
+        grid_y = (north - p[:, 1]) / dy
+        col = torch.floor(grid_x).to(torch.long)
+        row = torch.floor(grid_y).to(torch.long)
+        col = torch.where(p[:, 0] == east, col.new_full((), width - 1), col)
+        row = torch.where(p[:, 1] == south, row.new_full((), height - 1), row)
+        inside = (row >= 0) & (row < height) & (col >= 0) & (col < width)
+        safe_row, safe_col = row.clamp(0, height - 1), col.clamp(0, width - 1)
+        valid = inside & self._terrain_valid_mask[safe_row, safe_col]
+        if not bool(torch.all(valid).item()):
+            raise ValueError("hydrostatic lookup entered a NoData or out-of-domain cell")
+        accumulated = p[:, 3] * torch.minimum(p[:, 2], p[:, 4])
+        volume_sum = accumulated * self._active_cell_count
+        wet_count = torch.searchsorted(
+            self._elevation_volume_breaks, volume_sum, right=True) + 1
+        wet_count = wet_count.clamp(max=self._active_cell_count)
+        prefix = self._elevation_prefix_sum[wet_count]
+        level = (volume_sum + prefix) / wet_count.to(volume_sum.dtype)
+        elevation = self._terrain_elevation_grid[safe_row, safe_col]
+        return torch.relu(level - elevation)[:, None]
 
     def depth_factor(self, points):
         """Return the positive, unnormalised spatial depth factor."""
@@ -282,31 +419,40 @@ class ConditionalFloodPINN(nn.Module):
         depth_factor = torch.nn.functional.softplus(raw[:, :1]) / math.log(2.)
         if projection_factor_mean is not None and not self.mass_conserving_projection:
             raise ValueError("projection_factor_mean requires mass-conserving projection")
-        if self.mass_conserving_projection and len(points):
-            conditions = precise[:, 2:5]
-            unique_conditions, inverse = torch.unique(
-                conditions, dim=0, sorted=True, return_inverse=True)
-            if projection_factor_mean is None:
-                accumulated_by_group = (unique_conditions[:, 1] *
-                                        torch.minimum(unique_conditions[:, 0],
-                                                      unique_conditions[:, 2]))
-                positive = accumulated_by_group > 0
-                factor_means = raw.new_ones(len(unique_conditions))
-                if torch.any(positive):
-                    positive_means = self._anchor_factor_means(unique_conditions[positive])
-                    factor_means = factor_means.index_copy(
-                        0, torch.nonzero(positive, as_tuple=False)[:, 0], positive_means)
+        learned_depth = None
+        if (not self.hydrostatic_depth_baseline or
+                self.hydrostatic_learned_blend > 0.):
+            if self.mass_conserving_projection and len(points):
+                conditions = precise[:, 2:5]
+                unique_conditions, inverse = torch.unique(
+                    conditions, dim=0, sorted=True, return_inverse=True)
+                if projection_factor_mean is None:
+                    accumulated_by_group = (unique_conditions[:, 1] *
+                                            torch.minimum(unique_conditions[:, 0],
+                                                          unique_conditions[:, 2]))
+                    positive = accumulated_by_group > 0
+                    factor_means = raw.new_ones(len(unique_conditions))
+                    if torch.any(positive):
+                        positive_means = self._anchor_factor_means(unique_conditions[positive])
+                        factor_means = factor_means.index_copy(
+                            0, torch.nonzero(positive, as_tuple=False)[:, 0], positive_means)
+                else:
+                    factor_means = torch.as_tensor(
+                        projection_factor_mean, dtype=raw.dtype, device=raw.device)
+                    if factor_means.ndim == 0:
+                        factor_means = factor_means.expand(len(unique_conditions))
+                    if factor_means.shape != (len(unique_conditions),):
+                        raise ValueError("projection_factor_mean must be scalar or one value per condition")
+                denominator = factor_means[inverse, None].clamp_min(torch.finfo(raw.dtype).tiny)
+                learned_depth = accumulated_rain * depth_factor / denominator
             else:
-                factor_means = torch.as_tensor(
-                    projection_factor_mean, dtype=raw.dtype, device=raw.device)
-                if factor_means.ndim == 0:
-                    factor_means = factor_means.expand(len(unique_conditions))
-                if factor_means.shape != (len(unique_conditions),):
-                    raise ValueError("projection_factor_mean must be scalar or one value per condition")
-            denominator = factor_means[inverse, None].clamp_min(torch.finfo(raw.dtype).tiny)
-            h = accumulated_rain * depth_factor / denominator
+                learned_depth = accumulated_rain * depth_factor
+        if self.hydrostatic_depth_baseline:
+            equilibrium = self.equilibrium_depth(points).to(raw.dtype)
+            blend = self.hydrostatic_learned_blend
+            h = equilibrium if blend == 0. else (1. - blend) * equilibrium + blend * learned_depth
         else:
-            h = accumulated_rain * depth_factor
+            h = learned_depth
         uv = ramp * torch.tanh(raw[:, 1:]) * s["velocity_m_s"]
         if self.wet_velocity_gate:
             wet_gate_depth = s.get("wet_velocity_gate_m", 1e-5)
@@ -314,4 +460,6 @@ class ConditionalFloodPINN(nn.Module):
                 raise ValueError("wet_velocity_gate_m must be positive")
             wet_gate = accumulated_rain / (accumulated_rain + wet_gate_depth)
             uv = uv * wet_gate
+        if self.hard_mask_boundary:
+            uv = uv * self._wall_velocity_factors(points).to(uv.dtype)
         return torch.cat((h, uv), dim=1)

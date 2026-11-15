@@ -71,7 +71,8 @@ def _infer(model, points, batch_size, *, projection_factor_mean=None):
 def _full_domain_projection(model, full_xy, time_s, rainfall_mm_hr, duration_s,
                             batch_size):
     """Return deployment-equivalent depth-factor mean and anchor error."""
-    if not getattr(model, "mass_conserving_projection", False):
+    if not getattr(model, "uses_external_mass_projection",
+                   getattr(model, "mass_conserving_projection", False)):
         return None, 0.
     condition = torch.tensor(
         [[time_s, rainfall_mm_hr / 3_600_000., duration_s]],

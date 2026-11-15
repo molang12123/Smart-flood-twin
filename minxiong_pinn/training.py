@@ -199,8 +199,8 @@ def _fv_residuals(model, terrain, case, rng, cfg):
     return torch.stack((mass, momentum_x, momentum_y), dim=1), rate, duration
 
 
-def _loss(model, terrain, cases, rng, cfg):
-    pde_losses, pde_components, bc_losses, mass_losses = [], [], [], []
+def _loss(model, terrain, cases, rng, cfg, *, robust_pde=False):
+    pde_losses, pde_objectives, pde_components, bc_losses, mass_losses = [], [], [], [], []
     end_s = cfg["time_end_s"]
     for case in cases:
         if cfg.get("physics_form", "strong") == "finite_volume":
@@ -225,6 +225,9 @@ def _loss(model, terrain, cases, rng, cfg):
             indexes = torch.topk(scores, cfg["interior_points"], sorted=False).indices
             normalized_square = normalized_square[indexes]
         pde_losses.append(normalized_square.mean())
+        pde_objectives.append(
+            torch.log1p(normalized_square).mean() if robust_pde
+            else normalized_square.mean())
         pde_components.append(normalized_square.mean(dim=0))
 
         xy, normals = terrain.sample_boundary(rng, cfg["boundary_points"])
@@ -242,6 +245,13 @@ def _loss(model, terrain, cases, rng, cfg):
         audit_times = sorted(set((min(points[0, 4] * .5, end_s),
                                   min(points[0, 4], end_s), end_s)))
         for audit_time in audit_times:
+            expected = points[0, 3] * min(audit_time, points[0, 4])
+            if getattr(model, "exact_hydrostatic_mass", False):
+                # The water level is solved from every active DEM cell, so its
+                # domain mean is exact by construction. A sparse audit would
+                # be biased when only a few lowest cells are wet.
+                event_mass.append(raw.sum() * 0.)
+                continue
             if cfg.get("stratified_mass_sampling", False) and hasattr(terrain, "sample_mass_points"):
                 xy_m, mass_weights = terrain.sample_mass_points(
                     rng, cfg["mass_points"], strata=cfg.get("mass_sampling_strata", 16))
@@ -253,18 +263,18 @@ def _loss(model, terrain, cases, rng, cfg):
             depths = model(_tensor(m))[:, 0]
             mean_depth = (depths.mean() if mass_weights is None else
                           (depths * depths.new_tensor(mass_weights)).sum())
-            expected = points[0, 3] * min(audit_time, points[0, 4])
             # Relative volume error at rain-midpoint, stop time and horizon.
             event_mass.append(((mean_depth - expected) / max(expected, 1e-6)).square())
         mass_losses.append(torch.stack(event_mass).mean())
     component_mean = torch.stack(pde_components).mean(dim=0)
     parts = {"pde": torch.stack(pde_losses).mean(),
+             "pde_objective": torch.stack(pde_objectives).mean(),
              "pde_continuity": component_mean[0],
              "pde_momentum_x": component_mean[1],
              "pde_momentum_y": component_mean[2],
              "boundary": torch.stack(bc_losses).mean(),
              "mass": torch.stack(mass_losses).mean()}
-    total = (cfg["loss_weights"]["pde"] * parts["pde"] +
+    total = (cfg["loss_weights"]["pde"] * parts["pde_objective"] +
              cfg["loss_weights"]["boundary"] * parts["boundary"] +
              cfg["loss_weights"]["mass"] * parts["mass"])
     return total, parts
@@ -274,7 +284,7 @@ def evaluate(model, terrain, events, cfg, *, seed=9001):
     rng = np.random.default_rng(seed)
     rows = []
     for case in events:
-        loss, parts = _loss(model, terrain, [case], rng, cfg)
+        loss, parts = _loss(model, terrain, [case], rng, cfg, robust_pde=False)
         rows.append({"event_id": case["event_id"], "split": case["split"],
                      "rainfall_mm_hr": case["mean_intensity_mm_hr"],
                      "duration_s": case["duration_s"], "loss": float(loss.detach()),
@@ -339,7 +349,11 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
         mass_conserving_projection=cfg.get("mass_conserving_projection", False),
         mass_projection_anchor_points=cfg.get("mass_projection_anchor_points", 512),
         mass_projection_strata=cfg.get("mass_projection_strata", 32),
-        mass_projection_seed=cfg.get("mass_projection_seed", 20261113))
+        mass_projection_seed=cfg.get("mass_projection_seed", 20261113),
+        separate_output_networks=cfg.get("separate_output_networks", False),
+        hard_mask_boundary=cfg.get("hard_mask_boundary", False),
+        hydrostatic_depth_baseline=cfg.get("hydrostatic_depth_baseline", False),
+        hydrostatic_learned_blend=cfg.get("hydrostatic_learned_blend", 1.0))
     if (getattr(model, "mass_conserving_projection", False) and
             cfg.get("physics_form", "strong") != "finite_volume"):
         raise ValueError("mass-conserving projection requires finite_volume physics")
@@ -371,10 +385,18 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                 raise ValueError("initial checkpoint terrain does not match")
             model.load_state_dict(initial["model_state"])
         elif cfg.get("baseline_initialization", False):
-            torch.nn.init.zeros_(model.net[-1].weight); torch.nn.init.zeros_(model.net[-1].bias)
+            model.zero_output_layers()
     started = time.perf_counter() - previous_elapsed
     extreme = max(training, key=lambda event: event["total_mm"])
     zero_rain = [event for event in training if event["mean_intensity_mm_hr"] == 0.]
+    maximum_duration = max(event["duration_s"] for event in training)
+    long_duration = [event for event in training
+                     if event["duration_s"] >= .75 * maximum_duration and event is not extreme]
+    low_rain_limit = float(cfg.get("low_rain_anchor_max_mm_hr", 1.))
+    if not math.isfinite(low_rain_limit) or low_rain_limit <= 0:
+        raise ValueError("low_rain_anchor_max_mm_hr must be positive and finite")
+    low_rain = [event for event in training
+                if 0. < event["mean_intensity_mm_hr"] <= low_rain_limit]
     probabilities = np.asarray([math.sqrt(max(event["total_mm"], .1)) for event in training])
     probabilities /= probabilities.sum()
     last_step = start_step - 1
@@ -388,6 +410,11 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                 anchors.append(zero_rain[int(rng.integers(0, len(zero_rain)))])
             if cfg.get("always_include_extreme", False) and extreme not in anchors:
                 anchors.append(extreme)
+            if cfg.get("stratified_scenario_anchors", False):
+                for pool in (long_duration, low_rain):
+                    available = [event for event in pool if event not in anchors]
+                    if available and len(anchors) < batch_size:
+                        anchors.append(available[int(rng.integers(0, len(available)))])
             anchors = anchors[:batch_size]
             eligible = [event for event in training if event not in anchors]
             remaining = batch_size - len(anchors)
@@ -404,7 +431,9 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
         else:
             raise ValueError(f"unsupported scenario_sampling: {sampling}")
         optimizer.zero_grad(set_to_none=True)
-        total, parts = _loss(model, terrain, chosen, rng, cfg)
+        robust_pde = step <= int(cfg.get("robust_pde_warmup_steps", 0))
+        total, parts = _loss(model, terrain, chosen, rng, cfg,
+                             robust_pde=robust_pde)
         if not torch.isfinite(total): raise FloatingPointError("training loss became nonfinite")
         total.backward()
         depth_warmup = step <= int(cfg.get("depth_warmup_steps", 0))
@@ -413,13 +442,13 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
             raise ValueError("depth_gradient_scale must be in (0, 1]")
         if depth_warmup or depth_gradient_scale < 1.:
             scale = 0. if depth_warmup else depth_gradient_scale
-            if model.net[-1].weight.grad is not None: model.net[-1].weight.grad[0].mul_(scale)
-            if model.net[-1].bias.grad is not None: model.net[-1].bias.grad[0].mul_(scale)
+            model.scale_depth_gradients(scale)
         grad = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["gradient_clip"])
         optimizer.step()
         record = {"step": step, "elapsed_s": time.perf_counter() - started,
                   "total_loss": float(total.detach()), "gradient_norm": float(grad),
                   "depth_warmup": depth_warmup,
+                  "robust_pde_warmup": robust_pde,
                   **{f"{k}_loss": float(v.detach()) for k, v in parts.items()}}
         history.append(record)
         validate = step == 1 or step % cfg["validation_interval"] == 0 or step == cfg["adam_steps"]
@@ -430,7 +459,8 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
             if score < best:
                 best = score
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-            phase = "velocity-warmup" if depth_warmup else "joint"
+            phase = (("robust-" if robust_pde else "") +
+                     ("velocity-warmup" if depth_warmup else "joint"))
             print(f"step={step:5d} phase={phase} train={record['total_loss']:.5g} val={score:.5g} "
                   f"pde={record['pde_loss']:.5g} mass={record['mass_loss']:.5g}", flush=True)
         checkpoint_interval = int(cfg.get("checkpoint_interval", cfg["validation_interval"]))
@@ -465,6 +495,10 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                   "mass_projection_strata": getattr(model, "mass_projection_strata", 32),
                   "mass_projection_seed": getattr(model, "mass_projection_seed", 20261113),
                   "mass_projection_anchor_fingerprint": getattr(model, "mass_projection_anchor_fingerprint", None),
+                  "separate_output_networks": getattr(model, "separate_output_networks", False),
+                  "hard_mask_boundary": getattr(model, "hard_mask_boundary", False),
+                  "hydrostatic_depth_baseline": getattr(model, "hydrostatic_depth_baseline", False),
+                  "hydrostatic_learned_blend": getattr(model, "hydrostatic_learned_blend", 1.0),
                   "terrain_feature_version": (getattr(model, "terrain_feature_metadata", None) or {}).get("version"),
                   "terrain_fingerprint": terrain.fingerprint,
                   "training_rain_domain": {"rainfall_mm_hr": [min(e["mean_intensity_mm_hr"] for e in training), max(e["mean_intensity_mm_hr"] for e in training)],
