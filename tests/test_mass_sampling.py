@@ -67,6 +67,25 @@ class ElevationStratifiedMassSamplingTests(unittest.TestCase):
                 with self.subTest(strata=strata), self.assertRaises(ValueError):
                     terrain.sample_mass_points(rng, 2, strata=strata)
 
+    def test_full_domain_water_level_preserves_requested_mean_depth(self):
+        with tempfile.TemporaryDirectory() as folder:
+            terrain = _terrain(folder, np.arange(25).reshape(5, 5))
+            for mean_depth in (0., .1, 2., 20.):
+                level = terrain.water_level_for_mean_depth(mean_depth)
+                depths = np.maximum(level - terrain.z[terrain.mask], 0.)
+                self.assertAlmostEqual(float(depths.mean()), mean_depth, places=11)
+
+    def test_shoreline_control_volume_sampling_targets_nearby_elevations(self):
+        with tempfile.TemporaryDirectory() as folder:
+            terrain = _terrain(folder, np.arange(25).reshape(5, 5))
+            xy = terrain.sample_control_volumes_near_levels(
+                np.random.default_rng(8), np.full(100, 12.), window_cells=1)
+            elevations = terrain.query(xy[:, 0], xy[:, 1])["z"]
+            self.assertTrue(set(elevations) <= {11., 12., 13.})
+            with self.assertRaises(ValueError):
+                terrain.sample_control_volumes_near_levels(
+                    np.random.default_rng(8), [12.], window_cells=0)
+
 
 if __name__ == "__main__":
     unittest.main()

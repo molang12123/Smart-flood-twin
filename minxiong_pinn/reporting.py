@@ -58,6 +58,7 @@ def generate_report(output_dir: str | Path):
 <p>全部 {event_count} 個事件中的最差水量 loss：<b>{report['worst_all_event_mass_loss']:.6g}</b>；最差 PDE loss：<b>{worst_pde_text}</b>；最差連續方程 loss：<b>{worst_continuity_text}</b>；最差邊界法向速度 RMS：<b>{worst_boundary_text} m/s</b>。驗證與測試事件沒有加入參數更新。</p>
 <img src='data:image/png;base64,{figure_data('history')}'><img src='data:image/png;base64,{figure_data('events')}'>
 <h2>固定地形</h2><pre>{json.dumps(report['terrain'], ensure_ascii=False, indent=2)}</pre>
+<h2>驗收抽樣</h2><pre>{json.dumps(report.get('evaluation_sampling', {}), ensure_ascii=False, indent=2)}</pre>
 <h2>目前物理假設</h2><ul>{assumptions}</ul>
 <h2>結果邊界</h2><p>目前沒有實測淹水深度、流速或可信水動力模型結果，因此 <b>external flood observation validation = not available</b>。本報告的「通過」只代表設定的 PINN 方程殘差、封閉域邊界與全域水量門檻通過，不代表真實民雄淹水精度已驗證。</p>
 </html>"""

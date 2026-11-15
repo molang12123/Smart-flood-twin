@@ -48,6 +48,16 @@ class MaskedRasterTerrain:
         # without ever consulting NoData values.
         self._elevation_order = np.argsort(
             self.z[self.active_rows, self.active_cols], kind="stable")
+        self._sorted_active_elevation = self.z[
+            self.active_rows[self._elevation_order],
+            self.active_cols[self._elevation_order]]
+        self._elevation_prefix_sum = np.concatenate((
+            [0.], np.cumsum(self._sorted_active_elevation, dtype=np.float64)))
+        wet_count = np.arange(1, self.active_count, dtype=np.float64)
+        breaks = (wet_count * self._sorted_active_elevation[1:] -
+                  self._elevation_prefix_sum[1:-1])
+        self._elevation_volume_breaks = np.maximum.accumulate(
+            np.maximum(breaks, 0.))
         self.zx, self.zy = self._local_slopes()
         active_slope = np.hypot(self.zx[mask], self.zy[mask])
         cap = max(float(np.percentile(active_slope, 99)), 1e-12)
@@ -59,6 +69,12 @@ class MaskedRasterTerrain:
         interior[1:-1, 1:-1] &= (mask[1:-1, :-2] & mask[1:-1, 2:] &
                                  mask[:-2, 1:-1] & mask[2:, 1:-1])
         self.interior_rows, self.interior_cols = np.nonzero(interior)
+        interior_order = np.argsort(
+            self.z[self.interior_rows, self.interior_cols], kind="stable")
+        self._sorted_interior_rows = self.interior_rows[interior_order]
+        self._sorted_interior_cols = self.interior_cols[interior_order]
+        self._sorted_interior_elevation = self.z[
+            self._sorted_interior_rows, self._sorted_interior_cols]
         self.boundary_xy, self.boundary_normals, self.boundary_lengths = self._boundary_faces()
         digest = hashlib.sha256(self.path.read_bytes())
         digest.update(np.asarray([self.manning_n], dtype="<f8").tobytes())
@@ -196,6 +212,44 @@ class MaskedRasterTerrain:
             raise ValueError("terrain has no active cells with four active neighbours")
         indexes = rng.integers(0, len(self.interior_rows), size=count)
         rows, cols = self.interior_rows[indexes], self.interior_cols[indexes]
+        west, _, _, north = self.bounds
+        return np.column_stack((west + (cols + .5) * self.dx,
+                                north - (rows + .5) * self.dy))
+
+    def water_level_for_mean_depth(self, accumulated_depth_m):
+        """Solve the equal-area lake level for a full-domain mean depth."""
+        depth = np.asarray(accumulated_depth_m, dtype=np.float64)
+        if np.any(~np.isfinite(depth)) or np.any(depth < 0):
+            raise ValueError("accumulated depth must be finite and nonnegative")
+        volume_sum = depth * self.active_count
+        wet_count = (np.searchsorted(self._elevation_volume_breaks, volume_sum,
+                                     side="right") + 1)
+        wet_count = np.minimum(wet_count, self.active_count)
+        level = ((volume_sum + self._elevation_prefix_sum[wet_count]) /
+                 wet_count)
+        return float(level) if level.ndim == 0 else level
+
+    def sample_control_volumes_near_levels(self, rng: np.random.Generator,
+                                           levels, *, window_cells=256):
+        """Sample interior cells around one or more wet/dry water levels."""
+        levels = np.asarray(levels, dtype=np.float64).reshape(-1)
+        if not len(levels) or np.any(~np.isfinite(levels)):
+            raise ValueError("shoreline levels must be a nonempty finite sequence")
+        if (isinstance(window_cells, (bool, np.bool_)) or
+                int(window_cells) != window_cells or window_cells <= 0):
+            raise ValueError("shoreline window_cells must be a positive integer")
+        available = len(self._sorted_interior_elevation)
+        if not available:
+            raise ValueError("terrain has no active cells with four active neighbours")
+        window = min(int(window_cells), available)
+        centre = np.searchsorted(self._sorted_interior_elevation, levels,
+                                 side="left")
+        low = np.maximum(0, centre - window)
+        high = np.minimum(available, centre + window + 1)
+        low = np.minimum(low, high - 1)
+        ranks = rng.integers(low, high)
+        rows = self._sorted_interior_rows[ranks]
+        cols = self._sorted_interior_cols[ranks]
         west, _, _, north = self.bounds
         return np.column_stack((west + (cols + .5) * self.dx,
                                 north - (rows + .5) * self.dy))

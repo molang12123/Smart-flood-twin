@@ -35,14 +35,14 @@ MPLCONFIGDIR=/tmp/flood-pinn-mpl XDG_CACHE_HOME=/tmp/flood-pinn-cache .venv/bin/
 
 ## 0–800 mm/hr 三专家训练与验收
 
-当前 v7 把雨势拆成 low（0–50）、medium（30–300）和 high（200–800 mm/hr）三个专家；降雨时长为 1–24 小时，物理时域为 36 小时。配置在 `configs/minxiong_experts_0_800.json`。它用全 DEM 静水平衡深度先验精确保存累计雨水体积、独立速度网络与掩膜硬边界，并用稳健目标预热后再按严格 MSE 验收。这仍是待训练及待验收的研究方案，文档中的目标范围不代表模型已经通过。
+当前 v8 把雨势拆成 low（0–50）、medium（30–300）和 high（200–800 mm/hr）三个专家；降雨时长为 1–24 小时，物理时域为 36 小时。配置在 `configs/minxiong_experts_0_800.json`。它把全 DEM 静水平衡先验与可学习动态深度逐步混合，使用独立深度/速度网络、掩膜硬边界、湿干前缘采样及顺序无关的重复验证，并用稳健目标预热后再按严格 MSE 验收。这仍是待训练及待验收的研究方案，文档中的目标范围不代表模型已经通过。
 
 ```bash
 .venv/bin/python train_minxiong_experts.py configs/minxiong_experts_0_800.json
 .venv/bin/python audit_minxiong_experts.py configs/minxiong_experts_0_800.json
 ```
 
-训练每 50 步原子保存 `training_state.pt`，可恢复模型、优化器、最佳权重、历史、NumPy/Torch 随机状态和累计时间；地形、事件或关键配置不一致时会拒绝误续训。审核只有在三个专家的 PDE、连续方程、封闭边界法向速度和水量门槛，以及 30–50、200–300 mm/hr 重叠区一致性与“训练锚点/正式全 DEM 归一化”偏差门槛全部通过后，才生成批准用 `manifest.json`。
+训练每 50 步原子保存 `training_state.pt`，可恢复模型、优化器、最佳权重、历史、NumPy/Torch 随机状态和累计时间；地形、事件或关键配置不一致时会拒绝误续训。当前物理验收控制体为 50% 湿干前缘重点抽样、50% 有效内部格均匀抽样，报告会明确记录，并非纯面积均匀误差。审核只有在三个专家的 PDE、连续方程、封闭边界法向速度和水量门槛，以及 30–50、200–300 mm/hr 重叠区一致性与“训练锚点/正式全 DEM 归一化”偏差门槛全部通过后，才生成批准用 `manifest.json`。
 
 发布时必须把审核通过的整个专家包（`manifest.json`、`low/`、`medium/`、`high/` 检查点及审核证据）一起部署到 `models/minxiong/experts/`；不能只复制 manifest。若任何门槛失败，应保留失败报告并继续使用 v4。
 

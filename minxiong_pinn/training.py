@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import time
@@ -158,6 +159,15 @@ def _fv_residuals(model, terrain, case, rng, cfg):
                          cfg.get("fv_time_slices", 0))
     t1 = t0 + dt
     tm = (t0 + t1) / 2
+    front_fraction = float(cfg.get("wet_dry_front_fraction", 0.))
+    if not 0. <= front_fraction <= 1.:
+        raise ValueError("wet_dry_front_fraction must be between zero and one")
+    front_count = int(round(count * front_fraction))
+    if front_count:
+        accumulated = rate * np.minimum(tm[:front_count], duration)
+        levels = terrain.water_level_for_mean_depth(accumulated)
+        xy[:front_count] = terrain.sample_control_volumes_near_levels(
+            rng, levels, window_cells=cfg.get("wet_dry_front_window_cells", 256))
 
     def make(coords, times):
         p = np.empty((len(coords), 5), dtype=np.float64)
@@ -280,15 +290,44 @@ def _loss(model, terrain, cases, rng, cfg, *, robust_pde=False):
     return total, parts
 
 
-def evaluate(model, terrain, events, cfg, *, seed=9001):
-    rng = np.random.default_rng(seed)
+def _event_evaluation_seed(base_seed, event, repeat):
+    signature = json.dumps({
+        "base_seed": int(base_seed), "repeat": int(repeat),
+        "event_id": event.get("event_id"), "split": event.get("split"),
+        "rainfall_mm_hr": float(event["mean_intensity_mm_hr"]),
+        "duration_s": float(event["duration_s"]),
+    }, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(signature.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "little")
+
+
+def evaluate(model, terrain, events, cfg, *, seed=9001, repeats=1,
+             interior_points=None):
+    if isinstance(repeats, bool) or int(repeats) != repeats or repeats <= 0:
+        raise ValueError("evaluation repeats must be a positive integer")
+    eval_cfg = cfg
+    if interior_points is not None:
+        if (isinstance(interior_points, bool) or int(interior_points) != interior_points or
+                interior_points <= 0):
+            raise ValueError("evaluation interior_points must be a positive integer")
+        eval_cfg = dict(cfg)
+        eval_cfg["interior_points"] = int(interior_points)
     rows = []
     for case in events:
-        loss, parts = _loss(model, terrain, [case], rng, cfg, robust_pde=False)
+        results = []
+        for repeat in range(int(repeats)):
+            rng = np.random.default_rng(_event_evaluation_seed(seed, case, repeat))
+            loss, parts = _loss(model, terrain, [case], rng, eval_cfg,
+                                robust_pde=False)
+            results.append((float(loss.detach()),
+                            {key: float(value.detach()) for key, value in parts.items()}))
         rows.append({"event_id": case["event_id"], "split": case["split"],
                      "rainfall_mm_hr": case["mean_intensity_mm_hr"],
-                     "duration_s": case["duration_s"], "loss": float(loss.detach()),
-                     **{f"{k}_loss": float(v.detach()) for k, v in parts.items()}})
+                     "duration_s": case["duration_s"],
+                     "loss": float(np.mean([result[0] for result in results])),
+                     **{f"{key}_loss": float(np.mean([
+                         result[1][key] for result in results]))
+                        for key in results[0][1]}})
     return rows
 
 
@@ -312,18 +351,37 @@ def _training_identity(terrain, events, cfg):
             "events": event_signatures, "config": config}
 
 
+def _scheduled_hydrostatic_blend(cfg, step):
+    target = float(cfg.get("hydrostatic_learned_blend", 1.))
+    start = cfg.get("hydrostatic_blend_start_step", 0)
+    ramp = cfg.get("hydrostatic_blend_ramp_steps", 0)
+    if (isinstance(start, bool) or int(start) != start or start < 0 or
+            isinstance(ramp, bool) or int(ramp) != ramp or ramp < 0):
+        raise ValueError("hydrostatic blend schedule steps must be nonnegative integers")
+    if not cfg.get("hydrostatic_depth_baseline", False):
+        return target
+    if step <= int(start):
+        return 0.
+    if int(ramp) == 0:
+        return target
+    progress = min(1., (step - int(start)) / int(ramp))
+    return target * progress
+
+
 def _atomic_torch_save(value, path):
     path = Path(path); temporary = path.with_name(path.name + ".tmp")
     torch.save(value, temporary); temporary.replace(path)
 
 
 def _save_training_state(path, *, identity, model, optimizer, step, best,
-                         best_state, history, rng, elapsed_s):
-    _atomic_torch_save({"schema_version": 1, "identity": identity,
+                         best_state, best_blend, current_blend, history, rng,
+                         elapsed_s):
+    _atomic_torch_save({"schema_version": 2, "identity": identity,
                         "model_state": model.state_dict(),
                         "optimizer_state": optimizer.state_dict(),
                         "step": int(step), "best": float(best),
-                        "best_state": best_state, "history": history,
+                        "best_state": best_state, "best_blend": float(best_blend),
+                        "current_blend": float(current_blend), "history": history,
                         "rng_state": rng.bit_generator.state,
                         "torch_rng_state": torch.get_rng_state(),
                         "elapsed_s": float(elapsed_s)}, path)
@@ -367,14 +425,19 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
     identity = _training_identity(terrain, events, cfg)
     identity["mass_projection_anchor_fingerprint"] = getattr(
         model, "mass_projection_anchor_fingerprint", None)
-    history, best, best_state, previous_elapsed, start_step = [], math.inf, None, 0., 1
+    current_blend = float(getattr(model, "hydrostatic_learned_blend", 1.))
+    history, best, best_state, best_blend = [], math.inf, None, current_blend
+    previous_elapsed, start_step = 0., 1
     if resume_from_state:
         state = torch.load(state_path, map_location="cpu", weights_only=True)
-        if state.get("schema_version") != 1 or state.get("identity") != identity:
+        if state.get("schema_version") != 2 or state.get("identity") != identity:
             raise ValueError("training checkpoint does not match terrain, events, or configuration")
         model.load_state_dict(state["model_state"]); optimizer.load_state_dict(state["optimizer_state"])
         history = list(state["history"]); best = float(state["best"])
         best_state = state.get("best_state"); rng.bit_generator.state = state["rng_state"]
+        best_blend = float(state.get("best_blend", current_blend))
+        current_blend = float(state.get("current_blend", current_blend))
+        model.hydrostatic_learned_blend = current_blend
         torch.set_rng_state(state["torch_rng_state"])
         previous_elapsed = float(state.get("elapsed_s", 0.)); start_step = int(state["step"]) + 1
         print(f"resuming training at step {start_step}", flush=True)
@@ -397,11 +460,19 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
         raise ValueError("low_rain_anchor_max_mm_hr must be positive and finite")
     low_rain = [event for event in training
                 if 0. < event["mean_intensity_mm_hr"] <= low_rain_limit]
+    short_duration_max_s = float(cfg.get("short_duration_anchor_max_hr", 2.)) * 3600.
+    if not math.isfinite(short_duration_max_s) or short_duration_max_s <= 0:
+        raise ValueError("short_duration_anchor_max_hr must be positive and finite")
+    short_duration = [event for event in training
+                      if event["duration_s"] <= short_duration_max_s and
+                      event["mean_intensity_mm_hr"] > low_rain_limit]
     probabilities = np.asarray([math.sqrt(max(event["total_mm"], .1)) for event in training])
     probabilities /= probabilities.sum()
     last_step = start_step - 1
     for step in range(start_step, cfg["adam_steps"] + 1):
         last_step = step
+        current_blend = _scheduled_hydrostatic_blend(cfg, step)
+        model.hydrostatic_learned_blend = current_blend
         batch_size = min(cfg["scenarios_per_batch"], len(training))
         sampling = cfg.get("scenario_sampling", "extreme_weighted")
         if sampling == "uniform":
@@ -411,7 +482,7 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
             if cfg.get("always_include_extreme", False) and extreme not in anchors:
                 anchors.append(extreme)
             if cfg.get("stratified_scenario_anchors", False):
-                for pool in (long_duration, low_rain):
+                for pool in (long_duration, low_rain, short_duration):
                     available = [event for event in pool if event not in anchors]
                     if available and len(anchors) < batch_size:
                         anchors.append(available[int(rng.integers(0, len(available)))])
@@ -449,16 +520,21 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                   "total_loss": float(total.detach()), "gradient_norm": float(grad),
                   "depth_warmup": depth_warmup,
                   "robust_pde_warmup": robust_pde,
+                  "hydrostatic_learned_blend": current_blend,
                   **{f"{k}_loss": float(v.detach()) for k, v in parts.items()}}
         history.append(record)
         validate = step == 1 or step % cfg["validation_interval"] == 0 or step == cfg["adam_steps"]
         if validate:
             validation_seed = int(cfg.get("validation_seed", cfg["seed"] + 50_000))
-            metrics = evaluate(model, terrain, validation, cfg, seed=validation_seed)
+            metrics = evaluate(
+                model, terrain, validation, cfg, seed=validation_seed,
+                repeats=cfg.get("validation_repeats", 1),
+                interior_points=cfg.get("validation_interior_points"))
             score = float(np.mean([r["loss"] for r in metrics])); record["validation_loss"] = score
             if score < best:
                 best = score
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                best_blend = current_blend
             phase = (("robust-" if robust_pde else "") +
                      ("velocity-warmup" if depth_warmup else "joint"))
             print(f"step={step:5d} phase={phase} train={record['total_loss']:.5g} val={score:.5g} "
@@ -468,16 +544,25 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
             raise ValueError("checkpoint_interval must be positive")
         if validate or step % checkpoint_interval == 0:
             _save_training_state(state_path, identity=identity, model=model, optimizer=optimizer,
-                                 step=step, best=best, best_state=best_state, history=history,
-                                 rng=rng, elapsed_s=time.perf_counter() - started)
+                                 step=step, best=best, best_state=best_state,
+                                 best_blend=best_blend, current_blend=current_blend,
+                                 history=history, rng=rng,
+                                 elapsed_s=time.perf_counter() - started)
         if time.perf_counter() - started >= cfg["max_seconds"]:
             break
     if last_step >= 1:
         _save_training_state(state_path, identity=identity, model=model, optimizer=optimizer,
-                             step=last_step, best=best, best_state=best_state, history=history,
-                             rng=rng, elapsed_s=time.perf_counter() - started)
-    if best_state is not None: model.load_state_dict(best_state)
-    all_metrics = evaluate(model, terrain, events, cfg, seed=cfg["seed"] + 9999)
+                             step=last_step, best=best, best_state=best_state,
+                             best_blend=best_blend, current_blend=current_blend,
+                             history=history, rng=rng,
+                             elapsed_s=time.perf_counter() - started)
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        model.hydrostatic_learned_blend = best_blend
+    all_metrics = evaluate(
+        model, terrain, events, cfg, seed=cfg["seed"] + 9999,
+        repeats=cfg.get("final_evaluation_repeats", 1),
+        interior_points=cfg.get("final_evaluation_interior_points"))
     with (output / "training_history.csv").open("w", newline="", encoding="utf-8") as stream:
         fields = sorted({k for row in history for k in row}); writer = csv.DictWriter(stream, fields)
         writer.writeheader(); writer.writerows(history)
@@ -524,6 +609,14 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
               "baseline_initialization": bool(cfg.get("baseline_initialization", False)),
               "depth_warmup_steps": int(cfg.get("depth_warmup_steps", 0)),
               "depth_gradient_scale": float(cfg.get("depth_gradient_scale", 1.)),
+              "hydrostatic_learned_blend": float(model.hydrostatic_learned_blend),
+              "evaluation_sampling": {
+                  "wet_dry_front_fraction": float(cfg.get("wet_dry_front_fraction", 0.)),
+                  "wet_dry_front_window_cells": int(cfg.get("wet_dry_front_window_cells", 256)),
+                  "validation_repeats": int(cfg.get("validation_repeats", 1)),
+                  "final_evaluation_repeats": int(cfg.get("final_evaluation_repeats", 1)),
+                  "description": "configured fraction of control volumes targets elevations near the hydrostatic wet/dry front; the remainder is uniform over valid interior cells",
+              },
               "resumable_checkpoint": str(state_path),
               "assumptions": cfg["assumptions"],
               "external_flood_observation_validation": "not_available",

@@ -10,6 +10,7 @@ import torch
 from minxiong_pinn.model import ConditionalFloodPINN
 from minxiong_pinn.predict import load_model
 from minxiong_pinn.terrain import MaskedRasterTerrain
+from minxiong_pinn.training import _scheduled_hydrostatic_blend
 
 
 def _terrain(folder):
@@ -120,6 +121,16 @@ class HardBoundaryModelTests(unittest.TestCase):
                     _scales(), width=4, layers=1, terrain=terrain,
                     hydrostatic_depth_baseline=True,
                     hydrostatic_learned_blend=1.1)
+
+    def test_hydrostatic_blend_schedule_is_bounded_and_deterministic(self):
+        cfg = {"hydrostatic_depth_baseline": True,
+               "hydrostatic_learned_blend": .5,
+               "hydrostatic_blend_start_step": 100,
+               "hydrostatic_blend_ramp_steps": 200}
+        self.assertEqual(_scheduled_hydrostatic_blend(cfg, 100), 0.)
+        self.assertEqual(_scheduled_hydrostatic_blend(cfg, 200), .25)
+        self.assertEqual(_scheduled_hydrostatic_blend(cfg, 300), .5)
+        self.assertEqual(_scheduled_hydrostatic_blend(cfg, 1000), .5)
 
     def test_new_architecture_round_trips_through_checkpoint_loader(self):
         with tempfile.TemporaryDirectory() as folder:

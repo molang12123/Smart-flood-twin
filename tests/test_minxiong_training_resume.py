@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
+import torch
 
 from minxiong_pinn.terrain import MaskedRasterTerrain
 from minxiong_pinn.training import train
@@ -53,6 +54,9 @@ class MinxiongTrainingResumeTests(unittest.TestCase):
             _, first = train(terrain, events, first_config, output)
             self.assertEqual(first["completed_steps"], 1)
             self.assertTrue((output / "training_state.pt").is_file())
+            state = torch.load(output / "training_state.pt", map_location="cpu",
+                               weights_only=True)
+            self.assertEqual(state["schema_version"], 2)
 
             resumed = self._config(2); resumed["resume_training"] = True
             _, second = train(terrain, events, resumed, output)
