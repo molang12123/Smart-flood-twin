@@ -260,7 +260,7 @@ class ConditionalFloodPINN(nn.Module):
         else:
             self.net = make_network(3)
 
-    def _raw_outputs(self, points):
+    def _network_features(self, points):
         if points.ndim != 2 or points.shape[1] != 5:
             raise ValueError("points must have shape (N, 5)")
         s = self.scales
@@ -316,7 +316,10 @@ class ConditionalFloodPINN(nn.Module):
             log_post_rain = torch.log1p(post_rain / time_reference) / denominator
             temporal_q = torch.stack((log_time, rain_progress, log_post_rain), dim=1)
             q = torch.cat((q, temporal_q), dim=1)
-        q = q.to(next(self.parameters()).dtype)
+        return q.to(next(self.parameters()).dtype)
+
+    def _raw_outputs(self, points):
+        q = self._network_features(points)
         if self.separate_output_networks:
             depth = (q.new_zeros((len(q), 1)) if self.exact_hydrostatic_mass
                      else self.depth_net(q))
@@ -417,8 +420,13 @@ class ConditionalFloodPINN(nn.Module):
 
     def depth_factor(self, points):
         """Return the positive, unnormalised spatial depth factor."""
-        raw = self._raw_outputs(points)
-        return torch.nn.functional.softplus(raw[:, :1]) / math.log(2.)
+        if self.separate_output_networks:
+            q = self._network_features(points)
+            raw_depth = (q.new_zeros((len(q), 1)) if self.exact_hydrostatic_mass
+                         else self.depth_net(q))
+        else:
+            raw_depth = self._raw_outputs(points)[:, :1]
+        return torch.nn.functional.softplus(raw_depth) / math.log(2.)
 
     def _hydrostatic_base_factor(self, points, equilibrium=None):
         if equilibrium is None:
@@ -462,12 +470,12 @@ class ConditionalFloodPINN(nn.Module):
             weights = self._mass_anchor_weights.to(
                 device=uniform_learned.device, dtype=uniform_learned.dtype)
             uniform_delta = ((uniform_learned - 1.) * weights[None, :]).sum(dim=1)
-            volume_delta = []
-            for condition in conditions:
-                accumulated = float(
-                    condition[1] * torch.minimum(condition[0], condition[2]))
+            wet_points, wet_weights, wet_groups = [], [], []
+            for group_index, condition in enumerate(conditions):
+                accumulated = float((
+                    condition[1] * torch.minimum(condition[0], condition[2])
+                ).detach().item())
                 if accumulated <= 0.:
-                    volume_delta.append(uniform_delta.new_zeros(()))
                     continue
                 volume_sum = accumulated * self._active_cell_count
                 wet_count = int(torch.searchsorted(
@@ -475,14 +483,14 @@ class ConditionalFloodPINN(nn.Module):
                     self._elevation_volume_breaks.new_tensor(volume_sum),
                     right=True).item()) + 1
                 wet_count = min(wet_count, self._active_cell_count)
-                level = ((volume_sum + float(self._elevation_prefix_sum[wet_count])) /
+                level = ((volume_sum + float(
+                    self._elevation_prefix_sum[wet_count].detach().item())) /
                          wet_count)
                 depth_weights = torch.relu(
-                    self._sorted_active_elevation[:wet_count].new_tensor(level) -
+                    level -
                     self._sorted_active_elevation[:wet_count])
                 positive = torch.nonzero(depth_weights > 0., as_tuple=False)[:, 0]
                 if not len(positive):
-                    volume_delta.append(uniform_delta.new_zeros(()))
                     continue
                 depth_weights = depth_weights[positive]
                 wet_xy = self._sorted_active_xy[positive]
@@ -501,10 +509,18 @@ class ConditionalFloodPINN(nn.Module):
                 repeated = condition[None, :].repeat(len(selected_xy), 1)
                 sample_points = torch.cat((selected_xy.to(
                     device=conditions.device, dtype=conditions.dtype), repeated), dim=1)
-                delta = self.depth_factor(sample_points)[:, 0] - 1.
-                volume_delta.append((delta * selected_weights.to(
-                    device=delta.device, dtype=delta.dtype)).sum())
-            volume_delta = torch.stack(volume_delta)
+                wet_points.append(sample_points)
+                wet_weights.append(selected_weights.to(
+                    device=conditions.device, dtype=conditions.dtype))
+                wet_groups.append(torch.full(
+                    (len(selected_xy),), group_index, device=conditions.device,
+                    dtype=torch.long))
+            volume_delta = uniform_delta.new_zeros(groups)
+            if wet_points:
+                delta = self.depth_factor(torch.cat(wet_points, dim=0))[:, 0] - 1.
+                weighted_delta = delta * torch.cat(wet_weights).to(delta.dtype)
+                volume_delta = volume_delta.index_add(
+                    0, torch.cat(wet_groups), weighted_delta)
             blend = self.hydrostatic_learned_blend
             floor = self.hydrostatic_uniform_floor
             # The hydrostatic term is integrated in proportion to water

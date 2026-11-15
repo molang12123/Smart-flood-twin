@@ -159,6 +159,13 @@ class HardBoundaryModelTests(unittest.TestCase):
             self.assertAlmostEqual(float(exact[:, 0].mean().detach()), .01,
                                    places=7)
 
+            class VelocityMustNotRun(torch.nn.Module):
+                def forward(self, _):
+                    raise AssertionError("depth-only projection evaluated velocity_net")
+
+            model.velocity_net = VelocityMustNotRun()
+            self.assertTrue(torch.isfinite(model.depth_factor(points)).all())
+
     def test_hydrostatic_correction_settings_are_validated(self):
         with tempfile.TemporaryDirectory() as folder:
             terrain = _terrain(folder)
