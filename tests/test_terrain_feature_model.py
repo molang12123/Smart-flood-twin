@@ -7,7 +7,8 @@ import rasterio
 from rasterio.transform import from_origin
 import torch
 
-from minxiong_pinn.model import ConditionalFloodPINN, TERRAIN_FEATURE_NAMES
+from minxiong_pinn.model import (ConditionalFloodPINN, TERRAIN_FEATURE_NAMES,
+                                 TERRAIN_LOCAL_COORDINATE_NAMES)
 from minxiong_pinn.predict import load_model
 from minxiong_pinn.terrain import MaskedRasterTerrain
 
@@ -36,6 +37,27 @@ def _scales(terrain):
 
 
 class TerrainFeatureModelTests(unittest.TestCase):
+    def test_local_cell_coordinates_have_physical_spatial_derivatives(self):
+        with tempfile.TemporaryDirectory() as folder:
+            terrain = _terrain(folder, [[0, 1, 2], [3, 4, 5], [6, 7, 8]])
+            model = ConditionalFloodPINN(
+                _scales(terrain), width=4, layers=1, terrain=terrain,
+                terrain_features=True, terrain_local_coordinates=True)
+            points = torch.tensor(
+                [[12., 47., 3600., 10 / 3_600_000., 3600.]],
+                dtype=torch.float64, requires_grad=True)
+            features = model._network_features(points)
+            self.assertEqual(features.shape[1],
+                             5 + len(TERRAIN_FEATURE_NAMES) +
+                             len(TERRAIN_LOCAL_COORDINATE_NAMES))
+            torch.testing.assert_close(
+                features[0, -2:], features.new_tensor([.1, -.15]))
+            dx = torch.autograd.grad(features[0, -2], points,
+                                     retain_graph=True)[0][0]
+            dy = torch.autograd.grad(features[0, -1], points)[0][0]
+            self.assertAlmostEqual(float(dx[0]), 1 / terrain.dx)
+            self.assertAlmostEqual(float(dy[1]), 1 / terrain.dy)
+
     def test_adjacent_sharp_cells_have_explicit_distinct_features(self):
         with tempfile.TemporaryDirectory() as folder:
             terrain = _terrain(folder, [[0, 30, 1], [2, 3, 4], [5, 6, 7]])
@@ -74,11 +96,13 @@ class TerrainFeatureModelTests(unittest.TestCase):
             legacy_copy = ConditionalFloodPINN(scales, width=6, layers=2)
             legacy_copy.load_state_dict(legacy.state_dict())
 
-            model = ConditionalFloodPINN(scales, width=6, layers=2,
-                                         terrain_features=True, terrain=terrain)
+            model = ConditionalFloodPINN(
+                scales, width=6, layers=2, terrain_features=True,
+                terrain=terrain, terrain_local_coordinates=True)
             checkpoint = {
                 "model_state": model.state_dict(), "scales": scales,
                 "width": 6, "layers": 2, "terrain_features": True,
+                "terrain_local_coordinates": True,
                 "terrain_feature_version": model.terrain_feature_metadata["version"],
                 "terrain_fingerprint": terrain.fingerprint,
                 "training_rain_domain": {
@@ -91,6 +115,7 @@ class TerrainFeatureModelTests(unittest.TestCase):
                                   dtype=torch.float64)
             torch.testing.assert_close(loaded(points), model(points))
             self.assertTrue(loaded_checkpoint["terrain_features"])
+            self.assertTrue(loaded.terrain_local_coordinates)
 
     def test_terrain_is_required_only_for_feature_models(self):
         scales = {"x0": 0., "y0": 0., "lx": 1., "ly": 1., "time_s": 1.,

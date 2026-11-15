@@ -11,6 +11,7 @@ TERRAIN_FEATURE_VERSION = 1
 TERRAIN_FEATURE_NAMES = ("z", "slope_x", "slope_y", "dz_east", "dz_west",
                          "dz_north", "dz_south")
 ENHANCED_TIME_FEATURE_NAMES = ("log_time", "rain_progress", "log_post_rain")
+TERRAIN_LOCAL_COORDINATE_NAMES = ("cell_x", "cell_y")
 
 
 def _terrain_feature_array(terrain):
@@ -136,7 +137,8 @@ class ConditionalFloodPINN(nn.Module):
                  hydrostatic_depth_baseline: bool = False,
                  hydrostatic_learned_blend: float = 1.0,
                  hydrostatic_correction_mode: str = "convex",
-                 hydrostatic_uniform_floor: float = 0.0):
+                 hydrostatic_uniform_floor: float = 0.0,
+                 terrain_local_coordinates: bool = False):
         super().__init__()
         self.scales = {k: float(v) for k, v in scales.items()}
         self.log_conditions = bool(log_conditions)
@@ -154,6 +156,7 @@ class ConditionalFloodPINN(nn.Module):
         self.hydrostatic_learned_blend = float(hydrostatic_learned_blend)
         self.hydrostatic_correction_mode = str(hydrostatic_correction_mode)
         self.hydrostatic_uniform_floor = float(hydrostatic_uniform_floor)
+        self.terrain_local_coordinates = bool(terrain_local_coordinates)
         if not 0. <= self.hydrostatic_learned_blend <= 1.:
             raise ValueError("hydrostatic learned blend must be between zero and one")
         if self.hydrostatic_correction_mode not in {"convex", "multiplicative"}:
@@ -162,7 +165,8 @@ class ConditionalFloodPINN(nn.Module):
             raise ValueError("hydrostatic uniform floor must be in [0, 1)")
         if self.log_conditions and self.log1p_conditions:
             raise ValueError("log_conditions and log1p_conditions are mutually exclusive")
-        if (self.terrain_features or self.hard_mask_boundary or
+        if (self.terrain_features or self.terrain_local_coordinates or
+                self.hard_mask_boundary or
                 self.hydrostatic_depth_baseline):
             if terrain is None:
                 raise ValueError("terrain is required for terrain features or hard mask boundary")
@@ -240,6 +244,8 @@ class ConditionalFloodPINN(nn.Module):
             self.mass_projection_anchor_fingerprint = None
         input_features = (5 +
                           (len(TERRAIN_FEATURE_NAMES) if self.terrain_features else 0) +
+                          (len(TERRAIN_LOCAL_COORDINATE_NAMES)
+                           if self.terrain_local_coordinates else 0) +
                           (len(ENHANCED_TIME_FEATURE_NAMES)
                            if self.enhanced_time_features else 0))
         def make_network(outputs):
@@ -289,10 +295,12 @@ class ConditionalFloodPINN(nn.Module):
                        math.log1p(s["rain_m_s"] / rain_reference))
             q[:, 4] = (torch.log1p(p[:, 4] / duration_reference) /
                        math.log1p(s["duration_s"] / duration_reference))
-        if self.terrain_features:
+        if self.terrain_features or self.terrain_local_coordinates:
             west, east, south, north, dx, dy, width, height = self._terrain_geometry
-            col = torch.floor((p[:, 0] - west) / dx).to(torch.long)
-            row = torch.floor((north - p[:, 1]) / dy).to(torch.long)
+            grid_x = (p[:, 0] - west) / dx
+            grid_y = (north - p[:, 1]) / dy
+            col = torch.floor(grid_x).to(torch.long)
+            row = torch.floor(grid_y).to(torch.long)
             col = torch.where(p[:, 0] == east, col.new_full((), width - 1), col)
             row = torch.where(p[:, 1] == south, row.new_full((), height - 1), row)
             inside = (row >= 0) & (row < height) & (col >= 0) & (col < width)
@@ -301,8 +309,13 @@ class ConditionalFloodPINN(nn.Module):
             valid = inside & self._terrain_valid_mask[safe_row, safe_col]
             if not bool(torch.all(valid).item()):
                 raise ValueError("terrain-feature lookup entered a NoData or out-of-domain cell")
-            terrain_q = self._terrain_feature_grid[safe_row, safe_col].to(q.dtype)
-            q = torch.cat((q, terrain_q), dim=1)
+            if self.terrain_features:
+                terrain_q = self._terrain_feature_grid[safe_row, safe_col].to(q.dtype)
+                q = torch.cat((q, terrain_q), dim=1)
+            if self.terrain_local_coordinates:
+                local_x = grid_x - col.to(grid_x.dtype) - .5
+                local_y = .5 - (grid_y - row.to(grid_y.dtype))
+                q = torch.cat((q, torch.stack((local_x, local_y), dim=1)), dim=1)
         if self.enhanced_time_features:
             time_reference = s.get("time_log_reference_s", 600.)
             if time_reference <= 0 or s["time_s"] <= 0:
