@@ -18,9 +18,11 @@ DURATION_HR = 6.0
 
 
 def single_case_setup(physics="finite_volume"):
-    if physics not in {"finite_volume", "strong", "strong_finetune", "strong_local"}:
+    if physics not in {"finite_volume", "strong", "strong_finetune",
+                       "strong_local", "strong_local_finetune"}:
         raise ValueError(
-            "physics must be finite_volume, strong, strong_finetune, or strong_local")
+            "physics must be finite_volume, strong, strong_finetune, strong_local, "
+            "or strong_local_finetune")
     master = probe_config("uniform_strict")
     expert = master["experts"][0]
     cfg = copy.deepcopy(master["training"])
@@ -34,7 +36,8 @@ def single_case_setup(physics="finite_volume"):
         "final_evaluation_repeats": 3,
         "expert_name": "single_5mm_hr_6hr",
     })
-    if physics in {"strong", "strong_finetune", "strong_local"}:
+    if physics in {"strong", "strong_finetune", "strong_local",
+                   "strong_local_finetune"}:
         cfg.update({
             "adam_steps": 6000,
             "physics_form": "strong",
@@ -42,7 +45,7 @@ def single_case_setup(physics="finite_volume"):
             "wet_dry_front_fraction": 0.0,
             "expert_name": "single_5mm_hr_6hr_strong",
         })
-    if physics == "strong_local":
+    if physics in {"strong_local", "strong_local_finetune"}:
         cfg.update({
             "terrain_local_coordinates": True,
             "expert_name": "single_5mm_hr_6hr_strong_local",
@@ -57,6 +60,17 @@ def single_case_setup(physics="finite_volume"):
             "learning_rate": 0.00001,
             "initial_model_path": str(initial),
             "expert_name": "single_5mm_hr_6hr_strong_finetune",
+        })
+    if physics == "strong_local_finetune":
+        initial = (ROOT / "outputs" / "minxiong" / "v10_probes" /
+                   "single_5x6_strong_local" / "model.pt")
+        if not initial.is_file():
+            raise FileNotFoundError(
+                "run the strong_local single-case probe before strong_local_finetune")
+        cfg.update({
+            "learning_rate": 0.00001,
+            "initial_model_path": str(initial),
+            "expert_name": "single_5mm_hr_6hr_strong_local_finetune",
         })
     terrain = MaskedRasterTerrain(
         (BASE_CONFIG.parent / master["terrain_tif"]).resolve(),
@@ -89,6 +103,7 @@ def single_case_setup(physics="finite_volume"):
         "strong": "single_5x6_strong",
         "strong_finetune": "single_5x6_strong_finetune",
         "strong_local": "single_5x6_strong_local",
+        "strong_local_finetune": "single_5x6_strong_local_finetune",
     }
     suffix = suffixes[physics]
     output = ROOT / "outputs" / "minxiong" / "v10_probes" / suffix
