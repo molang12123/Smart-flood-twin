@@ -13,7 +13,9 @@ class ExpandedExpertDomainTests(unittest.TestCase):
     def test_v10_probes_are_short_isolated_low_expert_runs(self):
         uniform = probe_config("uniform")
         hydro90 = probe_config("hydro90")
-        for name, config in (("uniform", uniform), ("hydro90", hydro90)):
+        uniform_strict = probe_config("uniform_strict")
+        for name, config in (("uniform", uniform), ("hydro90", hydro90),
+                             ("uniform_strict", uniform_strict)):
             self.assertEqual(len(config["experts"]), 1)
             self.assertEqual(config["experts"][0]["name"], "low")
             self.assertEqual(config["training"]["adam_steps"], 800)
@@ -22,6 +24,8 @@ class ExpandedExpertDomainTests(unittest.TestCase):
         self.assertFalse(uniform["training"]["hydrostatic_depth_baseline"])
         self.assertTrue(hydro90["training"]["hydrostatic_depth_baseline"])
         self.assertEqual(hydro90["training"]["hydrostatic_uniform_floor"], .9)
+        self.assertEqual(uniform_strict["training"]["robust_pde_warmup_steps"], 0)
+        self.assertEqual(uniform_strict["training"]["learning_rate"], .00003)
         with self.assertRaisesRegex(ValueError, "variant"):
             probe_config("unknown")
 

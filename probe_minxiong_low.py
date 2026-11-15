@@ -28,6 +28,15 @@ VARIANTS = {
         "hydrostatic_blend_start_step": 0,
         "hydrostatic_blend_ramp_steps": 200,
     },
+    "uniform_strict": {
+        "hydrostatic_depth_baseline": False,
+        "hydrostatic_learned_blend": 1.0,
+        "hydrostatic_uniform_floor": 0.0,
+        "hydrostatic_blend_start_step": 0,
+        "hydrostatic_blend_ramp_steps": 0,
+        "robust_pde_warmup_steps": 0,
+        "learning_rate": 0.00003,
+    },
 }
 
 
