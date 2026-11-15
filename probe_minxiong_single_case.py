@@ -36,7 +36,7 @@ def single_case_setup(physics="finite_volume"):
     })
     if physics in {"strong", "strong_finetune", "strong_local"}:
         cfg.update({
-            "adam_steps": 1000 if physics == "strong_local" else 6000,
+            "adam_steps": 6000,
             "physics_form": "strong",
             "mass_conserving_projection": False,
             "wet_dry_front_fraction": 0.0,
