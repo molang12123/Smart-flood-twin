@@ -18,8 +18,8 @@ DURATION_HR = 6.0
 
 
 def single_case_setup(physics="finite_volume"):
-    if physics not in {"finite_volume", "strong"}:
-        raise ValueError("physics must be finite_volume or strong")
+    if physics not in {"finite_volume", "strong", "strong_finetune"}:
+        raise ValueError("physics must be finite_volume, strong, or strong_finetune")
     master = probe_config("uniform_strict")
     expert = master["experts"][0]
     cfg = copy.deepcopy(master["training"])
@@ -33,13 +33,24 @@ def single_case_setup(physics="finite_volume"):
         "final_evaluation_repeats": 3,
         "expert_name": "single_5mm_hr_6hr",
     })
-    if physics == "strong":
+    if physics in {"strong", "strong_finetune"}:
         cfg.update({
             "adam_steps": 6000,
             "physics_form": "strong",
             "mass_conserving_projection": False,
             "wet_dry_front_fraction": 0.0,
             "expert_name": "single_5mm_hr_6hr_strong",
+        })
+    if physics == "strong_finetune":
+        initial = (ROOT / "outputs" / "minxiong" / "v10_probes" /
+                   "single_5x6_strong" / "model.pt")
+        if not initial.is_file():
+            raise FileNotFoundError(
+                "run the strong single-case probe before strong_finetune")
+        cfg.update({
+            "learning_rate": 0.00001,
+            "initial_model_path": str(initial),
+            "expert_name": "single_5mm_hr_6hr_strong_finetune",
         })
     terrain = MaskedRasterTerrain(
         (BASE_CONFIG.parent / master["terrain_tif"]).resolve(),
@@ -67,7 +78,12 @@ def single_case_setup(physics="finite_volume"):
         "duration_s": DURATION_HR * 3600.,
         "total_mm": RAINFALL_MM_HR * DURATION_HR,
     } for split in ("train", "validation", "test")]
-    suffix = "single_5x6" if physics == "finite_volume" else "single_5x6_strong"
+    suffixes = {
+        "finite_volume": "single_5x6",
+        "strong": "single_5x6_strong",
+        "strong_finetune": "single_5x6_strong_finetune",
+    }
+    suffix = suffixes[physics]
     output = ROOT / "outputs" / "minxiong" / "v10_probes" / suffix
     return terrain, events, cfg, output
 
