@@ -439,7 +439,8 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
         hydrostatic_learned_blend=cfg.get("hydrostatic_learned_blend", 1.0),
         hydrostatic_correction_mode=cfg.get("hydrostatic_correction_mode", "convex"),
         hydrostatic_uniform_floor=cfg.get("hydrostatic_uniform_floor", 0.0),
-        terrain_local_coordinates=cfg.get("terrain_local_coordinates", False))
+        terrain_local_coordinates=cfg.get("terrain_local_coordinates", False),
+        network_architecture=cfg.get("network_architecture", "plain"))
     if (getattr(model, "mass_conserving_projection", False) and
             cfg.get("physics_form", "strong") != "finite_volume"):
         raise ValueError("mass-conserving projection requires finite_volume physics")
@@ -619,6 +620,8 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                   "hydrostatic_uniform_floor": getattr(model, "hydrostatic_uniform_floor", 0.0),
                   "terrain_local_coordinates": getattr(
                       model, "terrain_local_coordinates", False),
+                  "network_architecture": getattr(
+                      model, "network_architecture", "plain"),
                   "terrain_feature_version": (getattr(model, "terrain_feature_metadata", None) or {}).get("version"),
                   "terrain_fingerprint": terrain.fingerprint,
                   "training_rain_domain": {"rainfall_mm_hr": [min(e["mean_intensity_mm_hr"] for e in training), max(e["mean_intensity_mm_hr"] for e in training)],
@@ -653,6 +656,8 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
               "hydrostatic_learned_blend": float(model.hydrostatic_learned_blend),
               "terrain_local_coordinates": bool(getattr(
                   model, "terrain_local_coordinates", False)),
+              "network_architecture": getattr(
+                  model, "network_architecture", "plain"),
               "evaluation_sampling": {
                   "wet_dry_front_fraction": float(cfg.get("wet_dry_front_fraction", 0.)),
                   "wet_dry_front_window_cells": int(cfg.get("wet_dry_front_window_cells", 256)),

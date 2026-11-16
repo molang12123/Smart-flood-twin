@@ -32,6 +32,7 @@ def load_model(path, terrain):
         hydrostatic_correction_mode=checkpoint.get("hydrostatic_correction_mode", "convex"),
         hydrostatic_uniform_floor=checkpoint.get("hydrostatic_uniform_floor", 0.0),
         terrain_local_coordinates=checkpoint.get("terrain_local_coordinates", False),
+        network_architecture=checkpoint.get("network_architecture", "plain"),
     )
     if checkpoint.get("terrain_features", False):
         expected_version = checkpoint.get("terrain_feature_version")

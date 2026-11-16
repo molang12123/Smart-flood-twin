@@ -14,6 +14,47 @@ ENHANCED_TIME_FEATURE_NAMES = ("log_time", "rain_progress", "log_post_rain")
 TERRAIN_LOCAL_COORDINATE_NAMES = ("cell_x", "cell_y")
 
 
+class _ResidualTanhBlock(nn.Module):
+    """Smooth, variance-controlled residual block for strong-form PINNs."""
+
+    def __init__(self, width: int, residual_scale: float = .5):
+        super().__init__()
+        self.linear1 = nn.Linear(width, width)
+        self.linear2 = nn.Linear(width, width)
+        self.residual_scale = float(residual_scale)
+        self.output_scale = math.sqrt(1. + self.residual_scale ** 2)
+        for layer in (self.linear1, self.linear2):
+            nn.init.xavier_normal_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
+    def forward(self, values):
+        update = torch.tanh(self.linear2(torch.tanh(self.linear1(values))))
+        return (values + self.residual_scale * update) / self.output_scale
+
+
+class _ResidualTanhMLP(nn.Module):
+    """Tanh MLP with paired hidden layers connected by residual skips."""
+
+    def __init__(self, input_features: int, width: int, layers: int, outputs: int):
+        super().__init__()
+        self.input_layer = nn.Linear(input_features, width)
+        # One input layer plus two layers per block is close to the requested
+        # hidden depth while ensuring that every deep stage has a skip path.
+        block_count = max(0, int(layers) // 2)
+        self.blocks = nn.ModuleList(
+            _ResidualTanhBlock(width) for _ in range(block_count))
+        self.output_layer = nn.Linear(width, outputs)
+        for layer in (self.input_layer, self.output_layer):
+            nn.init.xavier_normal_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
+    def forward(self, values):
+        values = torch.tanh(self.input_layer(values))
+        for block in self.blocks:
+            values = block(values)
+        return self.output_layer(values)
+
+
 def _terrain_feature_array(terrain):
     """Build robustly normalised per-cell features without using NoData."""
     z = np.asarray(terrain.z, dtype=np.float64)
@@ -138,7 +179,8 @@ class ConditionalFloodPINN(nn.Module):
                  hydrostatic_learned_blend: float = 1.0,
                  hydrostatic_correction_mode: str = "convex",
                  hydrostatic_uniform_floor: float = 0.0,
-                 terrain_local_coordinates: bool = False):
+                 terrain_local_coordinates: bool = False,
+                 network_architecture: str = "plain"):
         super().__init__()
         self.scales = {k: float(v) for k, v in scales.items()}
         self.log_conditions = bool(log_conditions)
@@ -157,6 +199,7 @@ class ConditionalFloodPINN(nn.Module):
         self.hydrostatic_correction_mode = str(hydrostatic_correction_mode)
         self.hydrostatic_uniform_floor = float(hydrostatic_uniform_floor)
         self.terrain_local_coordinates = bool(terrain_local_coordinates)
+        self.network_architecture = str(network_architecture)
         if not 0. <= self.hydrostatic_learned_blend <= 1.:
             raise ValueError("hydrostatic learned blend must be between zero and one")
         if self.hydrostatic_correction_mode not in {"convex", "multiplicative"}:
@@ -165,6 +208,8 @@ class ConditionalFloodPINN(nn.Module):
             raise ValueError("hydrostatic uniform floor must be in [0, 1)")
         if self.log_conditions and self.log1p_conditions:
             raise ValueError("log_conditions and log1p_conditions are mutually exclusive")
+        if self.network_architecture not in {"plain", "residual"}:
+            raise ValueError("network architecture must be plain or residual")
         if (self.terrain_features or self.terrain_local_coordinates or
                 self.hard_mask_boundary or
                 self.hydrostatic_depth_baseline):
@@ -249,6 +294,8 @@ class ConditionalFloodPINN(nn.Module):
                           (len(ENHANCED_TIME_FEATURE_NAMES)
                            if self.enhanced_time_features else 0))
         def make_network(outputs):
+            if self.network_architecture == "residual":
+                return _ResidualTanhMLP(input_features, width, layers, outputs)
             blocks = [nn.Linear(input_features, width), nn.Tanh()]
             for _ in range(layers - 1):
                 blocks += [nn.Linear(width, width), nn.Tanh()]
@@ -341,11 +388,20 @@ class ConditionalFloodPINN(nn.Module):
 
     def zero_output_layers(self):
         """Start from uniform accumulated rain and zero velocity."""
-        layers = ((self.depth_net[-1], self.velocity_net[-1])
-                  if self.separate_output_networks else (self.net[-1],))
+        layers = ((self._output_layer(self.depth_net),
+                   self._output_layer(self.velocity_net))
+                  if self.separate_output_networks else
+                  (self._output_layer(self.net),))
         for layer in layers:
             nn.init.zeros_(layer.weight)
             nn.init.zeros_(layer.bias)
+
+    @staticmethod
+    def _output_layer(network):
+        """Return the final affine layer for either supported network type."""
+        if isinstance(network, nn.Sequential):
+            return network[-1]
+        return network.output_layer
 
     def scale_depth_gradients(self, scale):
         """Freeze/attenuate depth independently when the architecture allows it."""
@@ -355,7 +411,7 @@ class ConditionalFloodPINN(nn.Module):
                 if parameter.grad is not None:
                     parameter.grad.mul_(scale)
             return
-        layer = self.net[-1]
+        layer = self._output_layer(self.net)
         if layer.weight.grad is not None:
             layer.weight.grad[0].mul_(scale)
         if layer.bias.grad is not None:
