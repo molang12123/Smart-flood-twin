@@ -8,7 +8,8 @@ from rasterio.transform import from_origin
 import torch
 
 from minxiong_pinn.model import (ConditionalFloodPINN, TERRAIN_FEATURE_NAMES,
-                                 TERRAIN_LOCAL_COORDINATE_NAMES)
+                                 TERRAIN_LOCAL_COORDINATE_NAMES,
+                                 TERRAIN_LOCAL_PLANE_FEATURE_NAMES)
 from minxiong_pinn.predict import load_model
 from minxiong_pinn.terrain import MaskedRasterTerrain
 
@@ -37,6 +38,32 @@ def _scales(terrain):
 
 
 class TerrainFeatureModelTests(unittest.TestCase):
+    def test_local_plane_feature_has_dem_slope_derivatives_without_local_coordinates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            # Cell-centre elevations lie on z = 0.1 x + 0.2 y.
+            terrain = _terrain(folder, [[11, 13, 15], [7, 9, 11], [3, 5, 7]])
+            model = ConditionalFloodPINN(
+                _scales(terrain), width=4, layers=1, terrain=terrain,
+                terrain_local_plane_feature=True)
+            points = torch.tensor(
+                [[34., 27., 3600., 10 / 3_600_000., 3600.]],
+                dtype=torch.float64, requires_grad=True)
+            features = model._network_features(points)
+            metadata = model.terrain_local_plane_feature_metadata
+            self.assertEqual(features.shape[1],
+                             5 + len(TERRAIN_LOCAL_PLANE_FEATURE_NAMES))
+            expected_z = 9. + .1 * 4. + .2 * -3.
+            self.assertAlmostEqual(
+                float(features[0, -1].detach()),
+                (expected_z - metadata["z_centre_m"]) / metadata["z_scale_m"],
+                places=6)
+            derivative = torch.autograd.grad(features[0, -1], points)[0][0]
+            self.assertAlmostEqual(float(derivative[0]), .1 / metadata["z_scale_m"],
+                                   places=7)
+            self.assertAlmostEqual(float(derivative[1]), .2 / metadata["z_scale_m"],
+                                   places=7)
+            self.assertFalse(model.terrain_local_coordinates)
+
     def test_local_cell_coordinates_have_physical_spatial_derivatives(self):
         with tempfile.TemporaryDirectory() as folder:
             terrain = _terrain(folder, [[0, 1, 2], [3, 4, 5], [6, 7, 8]])
@@ -86,6 +113,17 @@ class TerrainFeatureModelTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "NoData"):
                 model(torch.tensor([[30., 50., 1., 0., 3600.]], dtype=torch.float64))
 
+            local_plane = ConditionalFloodPINN(
+                _scales(terrain), width=4, layers=1, terrain=terrain,
+                terrain_local_plane_feature=True)
+            self.assertGreater(
+                local_plane.terrain_local_plane_feature_metadata["z_centre_m"], -10.)
+            self.assertTrue(torch.isfinite(
+                local_plane._terrain_local_plane_z_grid).all())
+            with self.assertRaisesRegex(ValueError, "NoData"):
+                local_plane(torch.tensor(
+                    [[30., 50., 1., 0., 3600.]], dtype=torch.float64))
+
     def test_feature_checkpoint_rebuilds_grid_and_legacy_shape_is_unchanged(self):
         with tempfile.TemporaryDirectory() as folder:
             terrain = _terrain(folder, [[0, 1, 2], [3, 4, 5], [6, 7, 8]])
@@ -98,12 +136,16 @@ class TerrainFeatureModelTests(unittest.TestCase):
 
             model = ConditionalFloodPINN(
                 scales, width=6, layers=2, terrain_features=True,
-                terrain=terrain, terrain_local_coordinates=True)
+                terrain=terrain, terrain_local_coordinates=True,
+                terrain_local_plane_feature=True)
             checkpoint = {
                 "model_state": model.state_dict(), "scales": scales,
                 "width": 6, "layers": 2, "terrain_features": True,
                 "terrain_local_coordinates": True,
+                "terrain_local_plane_feature": True,
                 "terrain_feature_version": model.terrain_feature_metadata["version"],
+                "terrain_local_plane_feature_version":
+                    model.terrain_local_plane_feature_metadata["version"],
                 "terrain_fingerprint": terrain.fingerprint,
                 "training_rain_domain": {
                     "rainfall_mm_hr": [0., 800.], "duration_s": [3600., 86400.],
@@ -116,6 +158,7 @@ class TerrainFeatureModelTests(unittest.TestCase):
             torch.testing.assert_close(loaded(points), model(points))
             self.assertTrue(loaded_checkpoint["terrain_features"])
             self.assertTrue(loaded.terrain_local_coordinates)
+            self.assertTrue(loaded.terrain_local_plane_feature)
 
     def test_terrain_is_required_only_for_feature_models(self):
         scales = {"x0": 0., "y0": 0., "lx": 1., "ly": 1., "time_s": 1.,
@@ -124,6 +167,9 @@ class TerrainFeatureModelTests(unittest.TestCase):
         ConditionalFloodPINN(scales, width=4, layers=1)
         with self.assertRaisesRegex(ValueError, "terrain is required"):
             ConditionalFloodPINN(scales, width=4, layers=1, terrain_features=True)
+        with self.assertRaisesRegex(ValueError, "terrain is required"):
+            ConditionalFloodPINN(
+                scales, width=4, layers=1, terrain_local_plane_feature=True)
 
 
 if __name__ == "__main__":

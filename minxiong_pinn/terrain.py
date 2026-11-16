@@ -63,6 +63,19 @@ class MaskedRasterTerrain:
         cap = max(float(np.percentile(active_slope, 99)), 1e-12)
         weights = 1. + np.clip(active_slope / cap, 0., 1.) * 4.
         self._slope_probabilities = weights / weights.sum()
+        (self.interior_face_xy, self.interior_face_left_z,
+         self.interior_face_right_z,
+         self.interior_face_normals) = self._interior_faces()
+        face_relief = np.abs(
+            self.interior_face_right_z - self.interior_face_left_z)
+        if len(face_relief):
+            relief_cap = max(float(np.percentile(face_relief, 99)), 1e-12)
+            face_weights = 1. + 4. * np.clip(face_relief / relief_cap, 0., 1.)
+            self._interior_face_relief_probabilities = (
+                face_weights / face_weights.sum())
+        else:
+            self._interior_face_relief_probabilities = np.empty(
+                0, dtype=np.float64)
         interior = mask.copy()
         interior[0, :] = interior[-1, :] = False
         interior[:, 0] = interior[:, -1] = False
@@ -115,6 +128,43 @@ class MaskedRasterTerrain:
                     normals.append((nx, ny)); lengths.append(length)
         return (np.asarray(xy, dtype=np.float64), np.asarray(normals, dtype=np.float64),
                 np.asarray(lengths, dtype=np.float64))
+
+    def _interior_faces(self):
+        """Build each active-active raster face once with a fixed orientation.
+
+        East faces are oriented west-to-east with normal ``(+1, 0)``. South
+        faces are oriented north-to-south with normal ``(0, -1)``. Restricting
+        construction to those two directions avoids duplicate shared faces.
+        """
+        west, _, _, north = self.bounds
+        east_rows, east_cols = np.nonzero(
+            self.mask[:, :-1] & self.mask[:, 1:])
+        south_rows, south_cols = np.nonzero(
+            self.mask[:-1, :] & self.mask[1:, :])
+
+        east_xy = np.column_stack((
+            west + (east_cols + 1.) * self.dx,
+            north - (east_rows + .5) * self.dy,
+        ))
+        south_xy = np.column_stack((
+            west + (south_cols + .5) * self.dx,
+            north - (south_rows + 1.) * self.dy,
+        ))
+        xy = np.concatenate((east_xy, south_xy), axis=0).astype(
+            np.float64, copy=False)
+        left_z = np.concatenate((
+            self.z[east_rows, east_cols],
+            self.z[south_rows, south_cols],
+        )).astype(np.float64, copy=False)
+        right_z = np.concatenate((
+            self.z[east_rows, east_cols + 1],
+            self.z[south_rows + 1, south_cols],
+        )).astype(np.float64, copy=False)
+        normals = np.concatenate((
+            np.tile(np.asarray((1., 0.)), (len(east_rows), 1)),
+            np.tile(np.asarray((0., -1.)), (len(south_rows), 1)),
+        ), axis=0).astype(np.float64, copy=False)
+        return xy, left_z, right_z, normals
 
     def sample_points(self, rng: np.random.Generator, count: int, *, jitter: bool = True,
                       slope_fraction: float = 0.):
@@ -206,6 +256,88 @@ class MaskedRasterTerrain:
         # the exact face may map to its NoData neighbour under floor indexing.
         epsilon = min(self.dx, self.dy) * 1e-6
         return self.boundary_xy[indexes] - normals * epsilon, normals
+
+    def sample_interior_faces(self, rng: np.random.Generator, count: int, *,
+                              high_relief_fraction: float = 0.):
+        """Sample unique active-active faces, optionally favouring bed jumps.
+
+        The returned mapping contains the stable face indexes, face centres,
+        left/right cell-centre elevations, and the fixed left-to-right normal.
+        Sampling is always without replacement, including across the weighted
+        and uniform portions of a mixed request.
+        """
+        try:
+            count_value = float(count)
+        except (TypeError, ValueError):
+            count_value = float("nan")
+        if (isinstance(count, (bool, np.bool_)) or
+                not np.isfinite(count_value) or not count_value.is_integer() or
+                count_value <= 0):
+            raise ValueError("interior face sample count must be a positive integer")
+        count = int(count_value)
+        available_count = len(self.interior_face_xy)
+        if not available_count:
+            raise ValueError("terrain has no active-active interior faces")
+        if count > available_count:
+            raise ValueError(
+                "interior face sample count cannot exceed available faces")
+
+        try:
+            relief_fraction = float(high_relief_fraction)
+        except (TypeError, ValueError):
+            relief_fraction = float("nan")
+        if (isinstance(high_relief_fraction, (bool, np.bool_)) or
+                not np.isfinite(relief_fraction) or
+                not 0. <= relief_fraction <= 1.):
+            raise ValueError("high_relief_fraction must be between zero and one")
+
+        weighted_count = int(round(count * relief_fraction))
+        if weighted_count:
+            weighted = rng.choice(
+                available_count, size=weighted_count, replace=False,
+                p=self._interior_face_relief_probabilities)
+        else:
+            weighted = np.empty(0, dtype=np.int64)
+        uniform_count = count - weighted_count
+        if uniform_count:
+            # Interface batches are tiny compared with the full DEM. Rejection
+            # sampling avoids sorting or allocating a full-face permutation on
+            # every training step, while retaining a dense fallback for large
+            # requests.
+            excluded = set(map(int, weighted))
+            if count > available_count // 3:
+                available = np.ones(available_count, dtype=bool)
+                available[weighted] = False
+                remaining = np.flatnonzero(available)
+                uniform = rng.choice(
+                    remaining, size=uniform_count, replace=False)
+            else:
+                selected = []
+                while len(selected) < uniform_count:
+                    needed = uniform_count - len(selected)
+                    candidates = rng.choice(
+                        available_count,
+                        size=min(available_count, max(32, 2 * needed)),
+                        replace=False)
+                    for candidate in candidates:
+                        candidate = int(candidate)
+                        if candidate not in excluded:
+                            excluded.add(candidate)
+                            selected.append(candidate)
+                            if len(selected) == uniform_count:
+                                break
+                uniform = np.asarray(selected, dtype=np.int64)
+        else:
+            uniform = np.empty(0, dtype=np.int64)
+        indexes = np.concatenate((weighted, uniform))
+        rng.shuffle(indexes)
+        return {
+            "index": indexes,
+            "xy": self.interior_face_xy[indexes],
+            "left_z": self.interior_face_left_z[indexes],
+            "right_z": self.interior_face_right_z[indexes],
+            "normal": self.interior_face_normals[indexes],
+        }
 
     def sample_control_volumes(self, rng: np.random.Generator, count: int):
         if len(self.interior_rows) == 0:

@@ -12,6 +12,7 @@ TERRAIN_FEATURE_NAMES = ("z", "slope_x", "slope_y", "dz_east", "dz_west",
                          "dz_north", "dz_south")
 ENHANCED_TIME_FEATURE_NAMES = ("log_time", "rain_progress", "log_post_rain")
 TERRAIN_LOCAL_COORDINATE_NAMES = ("cell_x", "cell_y")
+TERRAIN_LOCAL_PLANE_FEATURE_NAMES = ("local_plane_z",)
 
 
 class _ResidualTanhBlock(nn.Module):
@@ -55,14 +56,20 @@ class _ResidualTanhMLP(nn.Module):
         return self.output_layer(values)
 
 
-def _terrain_feature_array(terrain):
-    """Build robustly normalised per-cell features without using NoData."""
+def _terrain_elevation_normalization(terrain):
+    """Return robust elevation centring derived only from valid DEM cells."""
     z = np.asarray(terrain.z, dtype=np.float64)
     mask = np.asarray(terrain.mask, dtype=bool)
     active_z = z[mask]
     z_centre = float(np.median(active_z))
     z_low, z_high = np.percentile(active_z, (5., 95.))
     z_scale = max(float(z_high - z_low), 1e-6)
+    return z, mask, z_centre, z_scale
+
+
+def _terrain_feature_array(terrain):
+    """Build robustly normalised per-cell features without using NoData."""
+    z, mask, z_centre, z_scale = _terrain_elevation_normalization(terrain)
     slope_magnitude = np.hypot(terrain.zx[mask], terrain.zy[mask])
     slope_scale = max(float(np.percentile(slope_magnitude, 99.)), 1e-6)
 
@@ -180,6 +187,10 @@ class ConditionalFloodPINN(nn.Module):
                  hydrostatic_correction_mode: str = "convex",
                  hydrostatic_uniform_floor: float = 0.0,
                  terrain_local_coordinates: bool = False,
+                 terrain_local_plane_feature: bool = False,
+                 conditioned_velocity_scale: bool = False,
+                 conditioned_velocity_scale_coefficient: float = 1.0,
+                 conditioned_velocity_scale_epsilon_m_s: float = 1e-3,
                  network_architecture: str = "plain"):
         super().__init__()
         self.scales = {k: float(v) for k, v in scales.items()}
@@ -199,6 +210,12 @@ class ConditionalFloodPINN(nn.Module):
         self.hydrostatic_correction_mode = str(hydrostatic_correction_mode)
         self.hydrostatic_uniform_floor = float(hydrostatic_uniform_floor)
         self.terrain_local_coordinates = bool(terrain_local_coordinates)
+        self.terrain_local_plane_feature = bool(terrain_local_plane_feature)
+        self.conditioned_velocity_scale = bool(conditioned_velocity_scale)
+        self.conditioned_velocity_scale_coefficient = float(
+            conditioned_velocity_scale_coefficient)
+        self.conditioned_velocity_scale_epsilon_m_s = float(
+            conditioned_velocity_scale_epsilon_m_s)
         self.network_architecture = str(network_architecture)
         if not 0. <= self.hydrostatic_learned_blend <= 1.:
             raise ValueError("hydrostatic learned blend must be between zero and one")
@@ -210,7 +227,14 @@ class ConditionalFloodPINN(nn.Module):
             raise ValueError("log_conditions and log1p_conditions are mutually exclusive")
         if self.network_architecture not in {"plain", "residual"}:
             raise ValueError("network architecture must be plain or residual")
+        if (not math.isfinite(self.conditioned_velocity_scale_coefficient) or
+                self.conditioned_velocity_scale_coefficient <= 0):
+            raise ValueError("conditioned velocity scale coefficient must be positive and finite")
+        if (not math.isfinite(self.conditioned_velocity_scale_epsilon_m_s) or
+                self.conditioned_velocity_scale_epsilon_m_s <= 0):
+            raise ValueError("conditioned velocity scale epsilon must be positive and finite")
         if (self.terrain_features or self.terrain_local_coordinates or
+                self.terrain_local_plane_feature or
                 self.hard_mask_boundary or
                 self.hydrostatic_depth_baseline):
             if terrain is None:
@@ -255,6 +279,27 @@ class ConditionalFloodPINN(nn.Module):
             self.terrain_feature_metadata = metadata
         else:
             self.terrain_feature_metadata = None
+        if self.terrain_local_plane_feature:
+            elevation, mask, z_centre, z_scale = _terrain_elevation_normalization(terrain)
+            # Invalid cells are never queried, and zeroing them prevents a NoData
+            # sentinel from entering even diagnostic buffer inspection.
+            local_elevation = np.where(mask, elevation, 0.)
+            local_zx = np.where(mask, np.asarray(terrain.zx, dtype=np.float64), 0.)
+            local_zy = np.where(mask, np.asarray(terrain.zy, dtype=np.float64), 0.)
+            self.register_buffer("_terrain_local_plane_z_grid",
+                                 torch.from_numpy(local_elevation), persistent=False)
+            self.register_buffer("_terrain_local_plane_zx_grid",
+                                 torch.from_numpy(local_zx), persistent=False)
+            self.register_buffer("_terrain_local_plane_zy_grid",
+                                 torch.from_numpy(local_zy), persistent=False)
+            self.terrain_local_plane_feature_metadata = {
+                "version": 1,
+                "names": list(TERRAIN_LOCAL_PLANE_FEATURE_NAMES),
+                "z_centre_m": z_centre,
+                "z_scale_m": z_scale,
+            }
+        else:
+            self.terrain_local_plane_feature_metadata = None
         if self.hard_mask_boundary:
             mask = np.asarray(terrain.mask, dtype=bool)
             exposed = np.zeros((*mask.shape, 4), dtype=bool)
@@ -289,6 +334,8 @@ class ConditionalFloodPINN(nn.Module):
             self.mass_projection_anchor_fingerprint = None
         input_features = (5 +
                           (len(TERRAIN_FEATURE_NAMES) if self.terrain_features else 0) +
+                          (len(TERRAIN_LOCAL_PLANE_FEATURE_NAMES)
+                           if self.terrain_local_plane_feature else 0) +
                           (len(TERRAIN_LOCAL_COORDINATE_NAMES)
                            if self.terrain_local_coordinates else 0) +
                           (len(ENHANCED_TIME_FEATURE_NAMES)
@@ -342,7 +389,8 @@ class ConditionalFloodPINN(nn.Module):
                        math.log1p(s["rain_m_s"] / rain_reference))
             q[:, 4] = (torch.log1p(p[:, 4] / duration_reference) /
                        math.log1p(s["duration_s"] / duration_reference))
-        if self.terrain_features or self.terrain_local_coordinates:
+        if (self.terrain_features or self.terrain_local_coordinates or
+                self.terrain_local_plane_feature):
             west, east, south, north, dx, dy, width, height = self._terrain_geometry
             grid_x = (p[:, 0] - west) / dx
             grid_y = (north - p[:, 1]) / dy
@@ -359,6 +407,18 @@ class ConditionalFloodPINN(nn.Module):
             if self.terrain_features:
                 terrain_q = self._terrain_feature_grid[safe_row, safe_col].to(q.dtype)
                 q = torch.cat((q, terrain_q), dim=1)
+            if self.terrain_local_plane_feature:
+                local_x = grid_x - col.to(grid_x.dtype) - .5
+                local_y = .5 - (grid_y - row.to(grid_y.dtype))
+                centre_z = self._terrain_local_plane_z_grid[safe_row, safe_col]
+                slope_x = self._terrain_local_plane_zx_grid[safe_row, safe_col]
+                slope_y = self._terrain_local_plane_zy_grid[safe_row, safe_col]
+                local_z = (centre_z + slope_x * dx * local_x +
+                           slope_y * dy * local_y)
+                metadata = self.terrain_local_plane_feature_metadata
+                local_z = ((local_z - metadata["z_centre_m"]) /
+                           metadata["z_scale_m"])
+                q = torch.cat((q, local_z[:, None]), dim=1)
             if self.terrain_local_coordinates:
                 local_x = grid_x - col.to(grid_x.dtype) - .5
                 local_y = .5 - (grid_y - row.to(grid_y.dtype))
@@ -681,7 +741,19 @@ class ConditionalFloodPINN(nn.Module):
                      (1. - blend) * equilibrium + blend * learned_depth)
             else:
                 h = learned_depth
-        uv = ramp * torch.tanh(raw[:, 1:]) * s["velocity_m_s"]
+        velocity_scale = s["velocity_m_s"]
+        if self.conditioned_velocity_scale:
+            epsilon = self.conditioned_velocity_scale_epsilon_m_s
+            nonnegative_accumulated = accumulated_rain.clamp_min(0.)
+            characteristic = self.conditioned_velocity_scale_coefficient * (
+                torch.sqrt(9.81 * nonnegative_accumulated + epsilon ** 2) -
+                epsilon)
+            characteristic = torch.where(
+                accumulated_rain > 0., characteristic,
+                torch.zeros_like(characteristic))
+            velocity_scale = characteristic.clamp(
+                min=0., max=s["velocity_m_s"])
+        uv = ramp * torch.tanh(raw[:, 1:]) * velocity_scale
         if self.wet_velocity_gate:
             wet_gate_depth = s.get("wet_velocity_gate_m", 1e-5)
             if wet_gate_depth <= 0:

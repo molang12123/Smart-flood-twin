@@ -51,6 +51,16 @@ def generate_report(output_dir: str | Path):
     worst_boundary_text = ("未計算" if worst_boundary is None
                            else f"{worst_boundary:.6g}")
     event_count = sum(int(value["events"]) for value in report["splits"].values())
+    architecture = {
+        "network_architecture": report.get("network_architecture", "plain"),
+        "terrain_local_coordinates": report.get("terrain_local_coordinates", False),
+        "terrain_local_plane_feature": report.get("terrain_local_plane_feature", False),
+        "conditioned_velocity_scale": report.get("conditioned_velocity_scale", False),
+        "conditioned_velocity_scale_coefficient": report.get(
+            "conditioned_velocity_scale_coefficient", 1.0),
+        "conditioned_velocity_scale_epsilon_m_s": report.get(
+            "conditioned_velocity_scale_epsilon_m_s", 1e-3),
+    }
     html = f"""<!doctype html><html lang='zh-Hant'><meta charset='utf-8'><title>民雄 PINN 訓練成果</title>
 <style>body{{font:16px/1.6 system-ui;max-width:1050px;margin:35px auto;padding:0 20px;color:#17202a}}h1,h2{{color:#174a6e}}.status{{padding:14px;background:#eef7f1;border-left:5px solid #29804b}}table{{border-collapse:collapse;width:100%}}th,td{{padding:8px;border:1px solid #ccd6dd;text-align:right}}th:first-child{{text-align:left}}img{{max-width:100%}}code{{background:#eef2f5;padding:2px 5px}}</style>
 <h1>民雄固定地形參數化 PINN 訓練成果</h1><p class='status'><b>{status}</b><br>完成 {report['completed_steps']} 步，耗時 {report['elapsed_s']:.1f} 秒；最佳驗證 loss {report['best_validation_loss']:.6g}。</p>
@@ -58,6 +68,7 @@ def generate_report(output_dir: str | Path):
 <p>全部 {event_count} 個事件中的最差水量 loss：<b>{report['worst_all_event_mass_loss']:.6g}</b>；最差 PDE loss：<b>{worst_pde_text}</b>；最差連續方程 loss：<b>{worst_continuity_text}</b>；最差邊界法向速度 RMS：<b>{worst_boundary_text} m/s</b>。驗證與測試事件沒有加入參數更新。</p>
 <img src='data:image/png;base64,{figure_data('history')}'><img src='data:image/png;base64,{figure_data('events')}'>
 <h2>固定地形</h2><pre>{json.dumps(report['terrain'], ensure_ascii=False, indent=2)}</pre>
+<h2>模型結構與實驗開關</h2><pre>{json.dumps(architecture, ensure_ascii=False, indent=2)}</pre>
 <h2>驗收抽樣</h2><pre>{json.dumps(report.get('evaluation_sampling', {}), ensure_ascii=False, indent=2)}</pre>
 <h2>水量約束</h2><p>{report.get('mass_constraint_method', '未記錄')}</p>
 <h2>目前物理假設</h2><ul>{assumptions}</ul>

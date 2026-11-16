@@ -440,6 +440,12 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
         hydrostatic_correction_mode=cfg.get("hydrostatic_correction_mode", "convex"),
         hydrostatic_uniform_floor=cfg.get("hydrostatic_uniform_floor", 0.0),
         terrain_local_coordinates=cfg.get("terrain_local_coordinates", False),
+        terrain_local_plane_feature=cfg.get("terrain_local_plane_feature", False),
+        conditioned_velocity_scale=cfg.get("conditioned_velocity_scale", False),
+        conditioned_velocity_scale_coefficient=cfg.get(
+            "conditioned_velocity_scale_coefficient", 1.0),
+        conditioned_velocity_scale_epsilon_m_s=cfg.get(
+            "conditioned_velocity_scale_epsilon_m_s", 1e-3),
         network_architecture=cfg.get("network_architecture", "plain"))
     if (getattr(model, "mass_conserving_projection", False) and
             cfg.get("physics_form", "strong") != "finite_volume"):
@@ -620,9 +626,19 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                   "hydrostatic_uniform_floor": getattr(model, "hydrostatic_uniform_floor", 0.0),
                   "terrain_local_coordinates": getattr(
                       model, "terrain_local_coordinates", False),
+                  "terrain_local_plane_feature": getattr(
+                      model, "terrain_local_plane_feature", False),
+                  "conditioned_velocity_scale": getattr(
+                      model, "conditioned_velocity_scale", False),
+                  "conditioned_velocity_scale_coefficient": getattr(
+                      model, "conditioned_velocity_scale_coefficient", 1.0),
+                  "conditioned_velocity_scale_epsilon_m_s": getattr(
+                      model, "conditioned_velocity_scale_epsilon_m_s", 1e-3),
                   "network_architecture": getattr(
                       model, "network_architecture", "plain"),
                   "terrain_feature_version": (getattr(model, "terrain_feature_metadata", None) or {}).get("version"),
+                  "terrain_local_plane_feature_version": (getattr(
+                      model, "terrain_local_plane_feature_metadata", None) or {}).get("version"),
                   "terrain_fingerprint": terrain.fingerprint,
                   "training_rain_domain": {"rainfall_mm_hr": [min(e["mean_intensity_mm_hr"] for e in training), max(e["mean_intensity_mm_hr"] for e in training)],
                                            "duration_s": [min(e["duration_s"] for e in training), max(e["duration_s"] for e in training)]}}
@@ -656,6 +672,14 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
               "hydrostatic_learned_blend": float(model.hydrostatic_learned_blend),
               "terrain_local_coordinates": bool(getattr(
                   model, "terrain_local_coordinates", False)),
+              "terrain_local_plane_feature": bool(getattr(
+                  model, "terrain_local_plane_feature", False)),
+              "conditioned_velocity_scale": bool(getattr(
+                  model, "conditioned_velocity_scale", False)),
+              "conditioned_velocity_scale_coefficient": float(getattr(
+                  model, "conditioned_velocity_scale_coefficient", 1.0)),
+              "conditioned_velocity_scale_epsilon_m_s": float(getattr(
+                  model, "conditioned_velocity_scale_epsilon_m_s", 1e-3)),
               "network_architecture": getattr(
                   model, "network_architecture", "plain"),
               "evaluation_sampling": {

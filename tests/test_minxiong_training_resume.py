@@ -87,5 +87,36 @@ class MinxiongTrainingResumeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not match"):
                 train(terrain, changed_events, valid_config, output)
 
+    def test_optional_terrain_and_velocity_features_are_recorded(self):
+        with tempfile.TemporaryDirectory() as folder:
+            terrain = self._terrain(folder)
+            events = [{"event_id": f"event_{split}", "split": split,
+                       "mean_intensity_mm_hr": 10., "duration_s": 600.,
+                       "total_mm": 10.}
+                      for split in ("train", "validation", "test")]
+            config = self._config(1)
+            config.update({
+                "terrain_local_plane_feature": True,
+                "conditioned_velocity_scale": True,
+                "conditioned_velocity_scale_coefficient": 1.25,
+                "conditioned_velocity_scale_epsilon_m_s": .002,
+            })
+            output = Path(folder) / "optional"
+            model, report = train(terrain, events, config, output)
+            checkpoint = torch.load(
+                output / "model.pt", map_location="cpu", weights_only=True)
+            self.assertTrue(model.terrain_local_plane_feature)
+            self.assertTrue(report["terrain_local_plane_feature"])
+            self.assertTrue(report["conditioned_velocity_scale"])
+            self.assertEqual(report["conditioned_velocity_scale_coefficient"], 1.25)
+            self.assertEqual(report["conditioned_velocity_scale_epsilon_m_s"], .002)
+            self.assertTrue(checkpoint["terrain_local_plane_feature"])
+            self.assertEqual(checkpoint["terrain_local_plane_feature_version"], 1)
+            self.assertTrue(checkpoint["conditioned_velocity_scale"])
+            html = (output / "training_results_report.html").read_text(
+                encoding="utf-8")
+            self.assertIn('"terrain_local_plane_feature": true', html)
+            self.assertIn('"conditioned_velocity_scale": true', html)
+
 
 if __name__ == "__main__": unittest.main()

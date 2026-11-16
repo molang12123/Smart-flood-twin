@@ -32,6 +32,14 @@ def load_model(path, terrain):
         hydrostatic_correction_mode=checkpoint.get("hydrostatic_correction_mode", "convex"),
         hydrostatic_uniform_floor=checkpoint.get("hydrostatic_uniform_floor", 0.0),
         terrain_local_coordinates=checkpoint.get("terrain_local_coordinates", False),
+        terrain_local_plane_feature=checkpoint.get(
+            "terrain_local_plane_feature", False),
+        conditioned_velocity_scale=checkpoint.get(
+            "conditioned_velocity_scale", False),
+        conditioned_velocity_scale_coefficient=checkpoint.get(
+            "conditioned_velocity_scale_coefficient", 1.0),
+        conditioned_velocity_scale_epsilon_m_s=checkpoint.get(
+            "conditioned_velocity_scale_epsilon_m_s", 1e-3),
         network_architecture=checkpoint.get("network_architecture", "plain"),
     )
     if checkpoint.get("terrain_features", False):
@@ -39,6 +47,11 @@ def load_model(path, terrain):
         actual_version = model.terrain_feature_metadata["version"]
         if expected_version is not None and int(expected_version) != actual_version:
             raise ValueError("checkpoint terrain-feature version is unsupported")
+    if checkpoint.get("terrain_local_plane_feature", False):
+        expected_version = checkpoint.get("terrain_local_plane_feature_version")
+        actual_version = model.terrain_local_plane_feature_metadata["version"]
+        if expected_version is not None and int(expected_version) != actual_version:
+            raise ValueError("checkpoint local-plane terrain-feature version is unsupported")
     expected_anchors = checkpoint.get("mass_projection_anchor_fingerprint")
     actual_anchors = getattr(model, "mass_projection_anchor_fingerprint", None)
     if expected_anchors is not None and expected_anchors != actual_anchors:
