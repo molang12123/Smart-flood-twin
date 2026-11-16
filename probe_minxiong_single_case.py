@@ -53,6 +53,8 @@ def single_case_setup(physics="finite_volume"):
         })
     if physics == "strong_local_wide":
         cfg.update({
+            "adam_steps": 12000,
+            "max_seconds": 3600,
             "width": 192,
             "layers": 8,
             "expert_name": "single_5mm_hr_6hr_strong_local_wide",
