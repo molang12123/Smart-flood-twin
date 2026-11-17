@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -7,6 +8,59 @@ import numpy as np
 import torch
 
 from .model import ConditionalFloodPINN
+
+
+FRAME_CSV_FIELDS = (
+    "time_s", "row", "col", "x_m", "y_m", "depth_m", "u_m_s", "v_m_s",
+    "speed_m_s",
+)
+SUMMARY_CSV_FIELDS = (
+    "model_id", "bundle_id", "rainfall_mm_hr", "duration_s", "time_s", "file",
+    "npz_file", "depth_tif_file", "max_depth_m", "mean_depth_m", "max_speed_m_s",
+    "mass_projection",
+)
+
+
+def _write_frame_csv(path, *, time_s, terrain, xy, result):
+    """Write one complete active-domain prediction frame with stable columns."""
+    if (xy.shape != (terrain.active_count, 2) or
+            result.shape != (terrain.active_count, 3)):
+        raise ValueError("prediction CSV arrays do not match the active terrain domain")
+    if not np.isfinite(xy).all() or not np.isfinite(result).all():
+        raise FloatingPointError("prediction CSV contains nonfinite values")
+    speed = np.linalg.norm(result[:, 1:].astype(np.float64), axis=1)
+    table = np.column_stack((
+        np.full(terrain.active_count, float(time_s), dtype=np.float64),
+        terrain.active_rows, terrain.active_cols, xy[:, 0], xy[:, 1],
+        result[:, 0], result[:, 1], result[:, 2], speed,
+    ))
+    np.savetxt(
+        path, table, delimiter=",", header=",".join(FRAME_CSV_FIELDS), comments="",
+        fmt=("%.17g", "%d", "%d", "%.17g", "%.17g", "%.9g", "%.9g",
+             "%.9g", "%.9g"),
+    )
+
+
+def _write_summary_csv(path, *, summary):
+    """Write a one-row-per-frame index suitable for Unreal runtime import."""
+    with Path(path).open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=SUMMARY_CSV_FIELDS)
+        writer.writeheader()
+        for frame in summary["frames"]:
+            writer.writerow({
+                "model_id": summary["model_id"],
+                "bundle_id": summary.get("bundle_id", ""),
+                "rainfall_mm_hr": summary["rainfall_mm_hr"],
+                "duration_s": summary["duration_s"],
+                "time_s": frame["time_s"],
+                "file": frame["csv_file"],
+                "npz_file": frame["file"],
+                "depth_tif_file": frame["depth_tif_file"],
+                "max_depth_m": frame["max_depth_m"],
+                "mean_depth_m": frame["mean_depth_m"],
+                "max_speed_m_s": frame["max_speed_m_s"],
+                "mass_projection": frame["mass_projection"],
+            })
 
 
 def load_model(path, terrain):
@@ -124,10 +178,17 @@ def predict(model, checkpoint, terrain, rainfall_mm_hr, duration_s, times_s, out
                     values = prediction_model(
                         point_tensor, projection_factor_mean=factor_mean)
                 result[start:stop] = values.numpy()
+        if not np.isfinite(result).all():
+            raise FloatingPointError("model produced nonfinite prediction values")
         frame = output / f"frame_{index:03d}.npz"
+        frame_csv = output / f"frame_{index:03d}.csv"
+        tif = output / f"depth_{index:03d}.tif"
         np.savez_compressed(frame, row=terrain.active_rows, col=terrain.active_cols,
                             x=xy[:, 0], y=xy[:, 1], h=result[:, 0], u=result[:, 1], v=result[:, 2])
+        _write_frame_csv(frame_csv, time_s=t, terrain=terrain, xy=xy, result=result)
         summary["frames"].append({"time_s": float(t), "file": frame.name,
+                                  "csv_file": frame_csv.name,
+                                  "depth_tif_file": tif.name,
                                   "max_depth_m": float(result[:, 0].max()),
                                   "mean_depth_m": float(result[:, 0].mean()),
                                   "max_speed_m_s": float(np.linalg.norm(result[:, 1:], axis=1).max()),
@@ -136,12 +197,12 @@ def predict(model, checkpoint, terrain, rainfall_mm_hr, duration_s, times_s, out
         raster = np.full((terrain.height, terrain.width), np.nan, dtype=np.float32)
         raster[terrain.active_rows, terrain.active_cols] = result[:, 0]
         import rasterio
-        tif = output / f"depth_{index:03d}.tif"
         with rasterio.open(tif, "w", driver="GTiff", width=terrain.width, height=terrain.height,
                            count=1, dtype="float32", crs=terrain.crs, transform=terrain.transform,
                            nodata=np.nan, compress="deflate") as dst:
             dst.write(raster, 1)
         if progress_callback is not None:
             progress_callback(index + 1, len(times_s), float(t), summary["frames"][-1])
+    _write_summary_csv(output / "prediction_summary.csv", summary=summary)
     (output / "prediction_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary

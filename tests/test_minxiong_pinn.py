@@ -1,3 +1,4 @@
+import csv
 from pathlib import Path
 import tempfile
 import unittest
@@ -40,7 +41,36 @@ class MinxiongPINNTests(unittest.TestCase):
             self.assertEqual(len(summary["frames"]), 2)
             self.assertTrue((output / "depth_001.tif").is_file())
             self.assertTrue((output / "frame_001.npz").is_file())
+            self.assertTrue((output / "frame_001.csv").is_file())
             self.assertTrue((output / "prediction_summary.json").is_file())
+            self.assertTrue((output / "prediction_summary.csv").is_file())
+            with (output / "frame_001.csv").open(newline="", encoding="utf-8") as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual(
+                tuple(rows[0]),
+                ("time_s", "row", "col", "x_m", "y_m", "depth_m", "u_m_s",
+                 "v_m_s", "speed_m_s"))
+            self.assertEqual(len(rows), terrain.active_count)
+            self.assertEqual(float(rows[0]["time_s"]), 3600.)
+            self.assertEqual((int(rows[0]["row"]), int(rows[0]["col"])), (0, 0))
+            self.assertEqual((float(rows[0]["x_m"]), float(rows[0]["y_m"])),
+                             (10., 30.))
+            self.assertAlmostEqual(float(rows[0]["depth_m"]), .01, places=7)
+            self.assertEqual(float(rows[0]["speed_m_s"]), 0.)
+            self.assertTrue(all(np.isfinite(float(row[field]))
+                                for row in rows
+                                for field in ("time_s", "x_m", "y_m", "depth_m",
+                                              "u_m_s", "v_m_s", "speed_m_s")))
+            with (output / "prediction_summary.csv").open(
+                    newline="", encoding="utf-8") as stream:
+                summary_rows = list(csv.DictReader(stream))
+            self.assertEqual(len(summary_rows), 2)
+            self.assertEqual(summary_rows[1]["file"], "frame_001.csv")
+            self.assertEqual(summary_rows[1]["npz_file"], "frame_001.npz")
+            self.assertEqual(summary_rows[1]["depth_tif_file"], "depth_001.tif")
+            self.assertEqual(summary_rows[1]["model_id"], "single")
+            self.assertAlmostEqual(float(summary_rows[1]["mean_depth_m"]), .01,
+                                   places=7)
 
     def test_finite_volume_balance_is_exact_for_flat_uniform_rain(self):
         with tempfile.TemporaryDirectory() as folder:
