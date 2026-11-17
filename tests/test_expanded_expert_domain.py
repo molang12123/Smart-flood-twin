@@ -56,6 +56,30 @@ class ExpandedExpertDomainTests(unittest.TestCase):
         self.assertEqual(config["routing"]["low_max_mm_hr"], 40)
         self.assertEqual(config["routing"]["medium_max_mm_hr"], 250)
 
+    def test_reduced_config_uses_two_balanced_experts_for_zero_to_300(self):
+        config = json.loads(
+            (ROOT / "configs/minxiong_experts_0_300.json").read_text())
+        self.assertEqual(config["durations_hr"], [1, 2, 3, 6, 12, 18, 24])
+        self.assertEqual(config["training"]["time_end_s"], 36 * 3600)
+        self.assertEqual(config["routing"]["low_max_mm_hr"], 40.)
+        self.assertNotIn("medium_max_mm_hr", config["routing"])
+        self.assertEqual(
+            [(item["name"], item["intensities_mm_hr"][0],
+              item["intensities_mm_hr"][-1])
+             for item in config["experts"]],
+            [("low", 0, 50), ("medium", 30, 300)])
+        training = config["training"]
+        self.assertEqual(training["physics_form"], "strong")
+        self.assertEqual(training["network_architecture"], "plain")
+        self.assertTrue(training["terrain_local_coordinates"])
+        self.assertFalse(training["terrain_local_plane_feature"])
+        self.assertFalse(training["conditioned_velocity_scale"])
+        self.assertFalse(training["mass_conserving_projection"])
+        self.assertEqual(training["loss_weights"]["interface"], 0.)
+        self.assertEqual(training["continuity_scale_m_s"], 1e-8)
+        self.assertEqual(config["routing"]["overlaps_for_audit_only"],
+                         [[30., 50.]])
+
     def test_zero_rain_is_a_trained_domain_edge(self):
         events = add_design_events([], [0, .5, 5, 50], [1, 3, 24])
         dry = [event for event in events if event["mean_intensity_mm_hr"] == 0]
