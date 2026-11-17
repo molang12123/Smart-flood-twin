@@ -23,6 +23,16 @@
     "batch_size": 8192,
     "seed": 20261117
   },
+  "continuous_domain_audit": {
+    "enabled": true,
+    "conditions_per_expert": 8,
+    "full_domain_conditions_per_expert": 2,
+    "interior_points": 1024,
+    "repeats": 3,
+    "batch_size": 8192,
+    "seed": 20261119,
+    "max_full_domain_mass_relative_error": 0.05
+  },
   "experts": [
     {
       "name": "low",

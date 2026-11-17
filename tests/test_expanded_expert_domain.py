@@ -80,6 +80,11 @@ class ExpandedExpertDomainTests(unittest.TestCase):
         self.assertEqual(training["continuity_scale_m_s"], 1e-8)
         self.assertEqual(config["routing"]["overlaps_for_audit_only"],
                          [[30., 50.]])
+        continuous_audit = config["continuous_domain_audit"]
+        self.assertTrue(continuous_audit["enabled"])
+        self.assertGreater(continuous_audit["conditions_per_expert"], 0)
+        self.assertGreater(
+            continuous_audit["full_domain_conditions_per_expert"], 0)
 
     def test_zero_rain_is_a_trained_domain_edge(self):
         events = add_design_events([], [0, .5, 5, 50], [1, 3, 24])

@@ -275,7 +275,13 @@ def build_approved_manifest(master, terrain, checkpoints, audit_report, output_r
     individual_passed = all(item["physics_training_passed"]
                             for item in audit_report["experts"])
     overlap_passed = bool(audit_report["overlap"]["passed"])
-    if not individual_passed or not overlap_passed:
+    continuous_required = bool(
+        master.get("continuous_domain_audit", {}).get("enabled", False))
+    continuous = audit_report.get("continuous_domain")
+    continuous_passed = (not continuous_required or
+                         (isinstance(continuous, dict) and
+                          continuous.get("passed") is True))
+    if not individual_passed or not overlap_passed or not continuous_passed:
         raise ValueError("cannot approve an expert bundle whose audit gates did not pass")
     rain_min = min(float(item["intensities_mm_hr"][0]) for item in master["experts"])
     rain_max = max(float(item["intensities_mm_hr"][-1]) for item in master["experts"])
@@ -298,7 +304,7 @@ def build_approved_manifest(master, terrain, checkpoints, audit_report, output_r
     if len(names) == 3:
         manifest_routing["medium_max_mm_hr"] = float(
             routing["medium_max_mm_hr"])
-    return {
+    manifest = {
         "schema_version": 1,
         "bundle_id": f"minxiong-{output_root.name}",
         "activation_approved": True,
@@ -314,6 +320,9 @@ def build_approved_manifest(master, terrain, checkpoints, audit_report, output_r
         "audit_file": "overlap_audit.json",
         "experts": experts,
     }
+    if continuous_required:
+        manifest["continuous_domain_audit_passed"] = True
+    return manifest
 
 
 def audit_and_publish(config_path, *, model_loader=load_model):
@@ -354,15 +363,26 @@ def audit_and_publish(config_path, *, model_loader=load_model):
         boundary_samples=settings.get("boundary_samples", 1024),
         batch_size=settings.get("batch_size", 8192),
         seed=settings.get("seed", 20261113))
+    continuous_settings = master.get("continuous_domain_audit", {})
+    continuous = None
+    if continuous_settings.get("enabled", False):
+        from .continuous_audit import evaluate_continuous_domain
+        continuous = evaluate_continuous_domain(
+            experts, checkpoints, terrain, master, continuous_settings)
     all_individual = all(item["physics_training_passed"] for item in individual)
+    continuous_passed = (continuous is None or continuous["passed"])
     audit_report = {
         "physics_training_passed": all_individual,
         "overlap_consistency_passed": overlap["passed"],
-        "activation_approved": bool(all_individual and overlap["passed"]),
+        "continuous_domain_passed": bool(continuous_passed),
+        "activation_approved": bool(
+            all_individual and overlap["passed"] and continuous_passed),
         "terrain_fingerprint": terrain.fingerprint,
         "experts": individual,
         "overlap": overlap,
     }
+    if continuous is not None:
+        audit_report["continuous_domain"] = continuous
     audit_path = output_root / "overlap_audit.json"
     audit_path.write_text(json.dumps(audit_report, ensure_ascii=False, indent=2),
                           encoding="utf-8")
