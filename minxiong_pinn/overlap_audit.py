@@ -19,7 +19,19 @@ from .predict import load_model
 from .terrain import MaskedRasterTerrain
 
 
-EXPERT_NAMES = ("low", "medium", "high")
+SUPPORTED_EXPERT_NAMES = ("low", "medium", "high")
+
+
+def _expert_names(master):
+    """Return the ordered expert ids for a supported two/three-expert config."""
+    experts = master.get("experts")
+    if not isinstance(experts, list) or len(experts) not in (2, 3):
+        raise ValueError("expert workflow requires two or three experts")
+    names = tuple(item.get("name") for item in experts if isinstance(item, dict))
+    expected = SUPPORTED_EXPERT_NAMES[:len(experts)]
+    if names != expected:
+        raise ValueError("experts must be ordered low, medium[, high]")
+    return names
 
 
 def _finite_positive(value, label):
@@ -243,11 +255,12 @@ def evaluate_overlap_consistency(experts, terrain, overlaps, durations_hr, time_
 
 
 def _configured_overlaps(master):
+    names = _expert_names(master)
     ranges = {item["name"]: (float(item["intensities_mm_hr"][0]),
                               float(item["intensities_mm_hr"][-1]))
               for item in master["experts"]}
     result = []
-    for left, right in zip(EXPERT_NAMES, EXPERT_NAMES[1:]):
+    for left, right in zip(names, names[1:]):
         low = max(ranges[left][0], ranges[right][0])
         high = min(ranges[left][1], ranges[right][1])
         if not low < high:
@@ -268,8 +281,9 @@ def build_approved_manifest(master, terrain, checkpoints, audit_report, output_r
     rain_max = max(float(item["intensities_mm_hr"][-1]) for item in master["experts"])
     duration_min = min(map(float, master["durations_hr"])) * 3600.
     duration_max = max(map(float, master["durations_hr"])) * 3600.
+    names = _expert_names(master)
     experts = []
-    for name in EXPERT_NAMES:
+    for name in names:
         domain = checkpoints[name]["training_rain_domain"]
         model_path = output_root / name / "model.pt"
         experts.append({
@@ -278,6 +292,12 @@ def build_approved_manifest(master, terrain, checkpoints, audit_report, output_r
             "trained_rainfall_mm_hr": list(map(float, domain["rainfall_mm_hr"])),
         })
     routing = master["routing"]
+    manifest_routing = {
+        "low_max_mm_hr": float(routing["low_max_mm_hr"]),
+    }
+    if len(names) == 3:
+        manifest_routing["medium_max_mm_hr"] = float(
+            routing["medium_max_mm_hr"])
     return {
         "schema_version": 1,
         "bundle_id": f"minxiong-{output_root.name}",
@@ -290,10 +310,7 @@ def build_approved_manifest(master, terrain, checkpoints, audit_report, output_r
             "rainfall_mm_hr": [rain_min, rain_max],
             "duration_s": [duration_min, duration_max],
         },
-        "routing": {
-            "low_max_mm_hr": float(routing["low_max_mm_hr"]),
-            "medium_max_mm_hr": float(routing["medium_max_mm_hr"]),
-        },
+        "routing": manifest_routing,
         "audit_file": "overlap_audit.json",
         "experts": experts,
     }
@@ -310,8 +327,9 @@ def audit_and_publish(config_path, *, model_loader=load_model):
         raise FileNotFoundError(f"expert output directory does not exist: {output_root}")
     terrain = MaskedRasterTerrain(resolve(master["terrain_tif"]),
                                   manning_n=master["manning_n"])
+    names = _expert_names(master)
     experts, checkpoints, individual = {}, {}, []
-    for name in EXPERT_NAMES:
+    for name in names:
         folder = output_root / name
         report_path = folder / "training_report.json"
         report = json.loads(report_path.read_text(encoding="utf-8"))

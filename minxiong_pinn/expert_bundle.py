@@ -18,7 +18,7 @@ from .predict import load_model
 
 
 SCHEMA_VERSION = 1
-EXPECTED_MODEL_IDS = ("low", "medium", "high")
+SUPPORTED_MODEL_IDS = ("low", "medium", "high")
 
 
 class ExpertBundle(nn.Module):
@@ -27,12 +27,14 @@ class ExpertBundle(nn.Module):
     def __init__(self, experts: dict[str, nn.Module], manifest: dict):
         super().__init__()
         self.experts = nn.ModuleDict(experts)
+        self.model_ids = tuple(experts)
         self.bundle_id = manifest["bundle_id"]
         self.low_max_mm_hr = float(manifest["routing"]["low_max_mm_hr"])
-        self.medium_max_mm_hr = float(manifest["routing"]["medium_max_mm_hr"])
+        medium_max = manifest["routing"].get("medium_max_mm_hr")
+        self.medium_max_mm_hr = (None if medium_max is None else float(medium_max))
         self.rainfall_domain = tuple(
             float(value) for value in manifest["training_rain_domain"]["rainfall_mm_hr"])
-        first = experts[EXPECTED_MODEL_IDS[0]]
+        first = experts[self.model_ids[0]]
         self.scales = dict(first.scales)
         self.scales["time_s"] = float(manifest["time_s"])
 
@@ -43,6 +45,8 @@ class ExpertBundle(nn.Module):
             raise ValueError("rainfall intensity is outside the expert bundle range")
         if rain <= self.low_max_mm_hr:
             return "low"
+        if len(self.model_ids) == 2:
+            return "medium"
         if rain <= self.medium_max_mm_hr:
             return "medium"
         return "high"
@@ -61,14 +65,17 @@ class ExpertBundle(nn.Module):
         if torch.any(rain < lo - tolerance) or torch.any(rain > hi + tolerance):
             raise ValueError("rainfall intensity is outside the expert bundle range")
         rain = rain.clamp(min=lo, max=hi)
-        masks = {
-            "low": rain <= self.low_max_mm_hr + tolerance,
-            "medium": ((rain > self.low_max_mm_hr + tolerance) &
-                       (rain <= self.medium_max_mm_hr + tolerance)),
-            "high": rain > self.medium_max_mm_hr + tolerance,
-        }
+        masks = {"low": rain <= self.low_max_mm_hr + tolerance}
+        if len(self.model_ids) == 2:
+            masks["medium"] = rain > self.low_max_mm_hr + tolerance
+        else:
+            masks.update({
+                "medium": ((rain > self.low_max_mm_hr + tolerance) &
+                           (rain <= self.medium_max_mm_hr + tolerance)),
+                "high": rain > self.medium_max_mm_hr + tolerance,
+            })
         result = None
-        for model_id in EXPECTED_MODEL_IDS:
+        for model_id in self.model_ids:
             mask = masks[model_id]
             if not torch.any(mask):
                 continue
@@ -121,19 +128,28 @@ def _manifest(path: Path) -> dict:
     if not isinstance(routing, dict):
         raise ValueError("expert bundle routing is missing")
     low_max = float(routing.get("low_max_mm_hr", math.nan))
-    medium_max = float(routing.get("medium_max_mm_hr", math.nan))
-    if not rain_domain[0] <= low_max < medium_max < rain_domain[1]:
-        raise ValueError("expert bundle routing thresholds do not cover the rainfall domain")
     experts = value.get("experts")
-    if not isinstance(experts, list) or len(experts) != 3:
-        raise ValueError("expert bundle must contain exactly three experts")
+    if not isinstance(experts, list) or len(experts) not in (2, 3):
+        raise ValueError("expert bundle must contain two or three experts")
     ids = [item.get("model_id") for item in experts if isinstance(item, dict)]
-    if tuple(ids) != EXPECTED_MODEL_IDS:
-        raise ValueError("expert bundle models must be ordered low, medium, high")
+    expected_ids = SUPPORTED_MODEL_IDS[:len(experts)]
+    if tuple(ids) != expected_ids:
+        raise ValueError(
+            "expert bundle models must be ordered low, medium[, high]")
+    if len(experts) == 2:
+        if not rain_domain[0] <= low_max < rain_domain[1]:
+            raise ValueError("expert bundle routing threshold does not cover the rainfall domain")
+        normalized_routing = {"low_max_mm_hr": low_max}
+    else:
+        medium_max = float(routing.get("medium_max_mm_hr", math.nan))
+        if not rain_domain[0] <= low_max < medium_max < rain_domain[1]:
+            raise ValueError("expert bundle routing thresholds do not cover the rainfall domain")
+        normalized_routing = {
+            "low_max_mm_hr": low_max, "medium_max_mm_hr": medium_max}
     value["time_s"] = time_s
     value["training_rain_domain"] = {
         "rainfall_mm_hr": list(rain_domain), "duration_s": list(duration_domain)}
-    value["routing"] = {"low_max_mm_hr": low_max, "medium_max_mm_hr": medium_max}
+    value["routing"] = normalized_routing
     return value
 
 
@@ -184,14 +200,19 @@ def load_expert_bundle(
         loaded[model_id] = model
         checkpoint_domains[model_id] = trained_rain
 
+    model_ids = tuple(entry["model_id"] for entry in manifest["experts"])
     low_max = manifest["routing"]["low_max_mm_hr"]
-    medium_max = manifest["routing"]["medium_max_mm_hr"]
     rain_lo, rain_hi = manifest["training_rain_domain"]["rainfall_mm_hr"]
-    required_primary = {
-        "low": (rain_lo, low_max),
-        "medium": (low_max, medium_max),
-        "high": (medium_max, rain_hi),
-    }
+    if len(model_ids) == 2:
+        required_primary = {
+            "low": (rain_lo, low_max), "medium": (low_max, rain_hi)}
+    else:
+        medium_max = manifest["routing"]["medium_max_mm_hr"]
+        required_primary = {
+            "low": (rain_lo, low_max),
+            "medium": (low_max, medium_max),
+            "high": (medium_max, rain_hi),
+        }
     for model_id, required in required_primary.items():
         trained = checkpoint_domains[model_id]
         if trained[0] > required[0] or trained[1] < required[1]:

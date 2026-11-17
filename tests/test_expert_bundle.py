@@ -45,6 +45,21 @@ def manifest(**changes):
     return value
 
 
+def two_expert_manifest(**changes):
+    value = manifest()
+    value.update({
+        "bundle_id": "minxiong-0-300-test",
+        "training_rain_domain": {
+            "rainfall_mm_hr": [0., 300.],
+            "duration_s": [3600., 24 * 3600.],
+        },
+        "routing": {"low_max_mm_hr": 40.},
+        "experts": value["experts"][:2],
+    })
+    value.update(changes)
+    return value
+
+
 def fake_loader(path, _terrain):
     model_id = Path(path).parent.name
     checkpoint = {
@@ -76,6 +91,27 @@ class ExpertBundleTests(unittest.TestCase):
             result = model(points)
             torch.testing.assert_close(
                 result[:, 0], torch.tensor([1, 1, 2, 2, 3, 3], dtype=torch.float64))
+
+    def test_two_expert_bundle_routes_continuous_zero_to_300_domain(self):
+        with tempfile.TemporaryDirectory() as folder:
+            model, checkpoint = self.load(folder, two_expert_manifest())
+            self.assertEqual(tuple(model.experts), ("low", "medium"))
+            self.assertEqual(
+                checkpoint["training_rain_domain"]["rainfall_mm_hr"],
+                [0., 300.])
+            self.assertEqual(
+                [model.model_id_for_rainfall(value)
+                 for value in (0., 40., 40.001, 123.456, 300.)],
+                ["low", "low", "medium", "medium", "medium"])
+            points = torch.zeros((5, 5), dtype=torch.float64)
+            points[:, 3] = torch.tensor(
+                [0., 40., 41., 250., 300.], dtype=torch.float64) / 3_600_000.
+            result = model(points)
+            torch.testing.assert_close(
+                result[:, 0],
+                torch.tensor([1., 1., 2., 2., 2.], dtype=torch.float64))
+            with self.assertRaisesRegex(ValueError, "outside"):
+                model.model_id_for_rainfall(300.001)
 
     def test_unapproved_or_escaping_bundle_is_rejected(self):
         with tempfile.TemporaryDirectory() as folder:

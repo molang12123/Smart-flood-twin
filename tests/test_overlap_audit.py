@@ -131,6 +131,39 @@ class OverlapAuditTests(unittest.TestCase):
                                         checkpoints, failed, Path(folder))
             self.assertFalse((Path(folder) / "manifest.json").exists())
 
+    def test_two_expert_manifest_covers_zero_to_300_without_high_route(self):
+        master = {
+            "durations_hr": [1., 24.],
+            "routing": {"low_max_mm_hr": 40.},
+            "training": {"time_end_s": 36 * 3600.},
+            "experts": [
+                {"name": "low", "intensities_mm_hr": [0., 50.]},
+                {"name": "medium", "intensities_mm_hr": [30., 300.]},
+            ],
+        }
+        checkpoints = {
+            "low": {"training_rain_domain": {
+                "rainfall_mm_hr": [0., 50.],
+                "duration_s": [3600., 86400.]}},
+            "medium": {"training_rain_domain": {
+                "rainfall_mm_hr": [30., 300.],
+                "duration_s": [3600., 86400.]}},
+        }
+        passed = {
+            "experts": [{"physics_training_passed": True}] * 2,
+            "overlap": {"passed": True},
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            manifest = build_approved_manifest(
+                master, SimpleNamespace(fingerprint="x"), checkpoints,
+                passed, Path(folder))
+        self.assertEqual(
+            manifest["training_rain_domain"]["rainfall_mm_hr"], [0., 300.])
+        self.assertEqual(manifest["routing"], {"low_max_mm_hr": 40.})
+        self.assertEqual(
+            [item["model_id"] for item in manifest["experts"]],
+            ["low", "medium"])
+
 
 if __name__ == "__main__":
     unittest.main()
