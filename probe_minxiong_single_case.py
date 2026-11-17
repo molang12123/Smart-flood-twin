@@ -20,10 +20,11 @@ DURATION_HR = 6.0
 def single_case_setup(physics="finite_volume"):
     if physics not in {"finite_volume", "strong", "strong_finetune",
                        "strong_local", "strong_local_finetune",
-                       "strong_local_wide", "strong_balanced"}:
+                       "strong_local_wide", "strong_plane", "strong_balanced"}:
         raise ValueError(
             "physics must be finite_volume, strong, strong_finetune, strong_local, "
-            "strong_local_finetune, strong_local_wide, or strong_balanced")
+            "strong_local_finetune, strong_local_wide, strong_plane, or "
+            "strong_balanced")
     master = probe_config("uniform_strict")
     expert = master["experts"][0]
     cfg = copy.deepcopy(master["training"])
@@ -39,7 +40,7 @@ def single_case_setup(physics="finite_volume"):
     })
     if physics in {"strong", "strong_finetune", "strong_local",
                    "strong_local_finetune", "strong_local_wide",
-                   "strong_balanced"}:
+                   "strong_plane", "strong_balanced"}:
         cfg.update({
             "adam_steps": 6000,
             "physics_form": "strong",
@@ -47,7 +48,8 @@ def single_case_setup(physics="finite_volume"):
             "wet_dry_front_fraction": 0.0,
             "expert_name": "single_5mm_hr_6hr_strong",
         })
-    if physics in {"strong_local", "strong_local_finetune", "strong_local_wide"}:
+    if physics in {"strong_local", "strong_local_finetune", "strong_local_wide",
+                   "strong_plane"}:
         cfg.update({
             "terrain_local_coordinates": True,
             "expert_name": "single_5mm_hr_6hr_strong_local",
@@ -59,6 +61,16 @@ def single_case_setup(physics="finite_volume"):
             "width": 192,
             "layers": 8,
             "expert_name": "single_5mm_hr_6hr_strong_local_wide",
+        })
+    if physics == "strong_plane":
+        # Isolate the differentiable local DEM plane while retaining the
+        # previously successful plain wide network and local cell coordinates.
+        cfg.update({
+            "adam_steps": 1000,
+            "width": 192,
+            "layers": 8,
+            "terrain_local_plane_feature": True,
+            "expert_name": "single_5mm_hr_6hr_strong_plane",
         })
     if physics == "strong_balanced":
         cfg.update({
@@ -142,6 +154,7 @@ def single_case_setup(physics="finite_volume"):
         "strong_local": "single_5x6_strong_local",
         "strong_local_finetune": "single_5x6_strong_local_finetune",
         "strong_local_wide": "single_5x6_strong_local_wide",
+        "strong_plane": "single_5x6_strong_plane",
         "strong_balanced": "single_5x6_strong_balanced",
     }
     suffix = suffixes[physics]
