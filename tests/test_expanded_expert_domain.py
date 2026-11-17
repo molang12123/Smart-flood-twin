@@ -76,6 +76,7 @@ class ExpandedExpertDomainTests(unittest.TestCase):
         self.assertFalse(training["conditioned_velocity_scale"])
         self.assertFalse(training["mass_conserving_projection"])
         self.assertEqual(training["loss_weights"]["interface"], 0.)
+        self.assertEqual(training["continuous_condition_samples_per_batch"], 1)
         self.assertEqual(training["continuity_scale_m_s"], 1e-8)
         self.assertEqual(config["routing"]["overlaps_for_audit_only"],
                          [[30., 50.]])

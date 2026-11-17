@@ -566,6 +566,79 @@ def _scheduled_hydrostatic_blend(cfg, step):
     return target * progress
 
 
+def _continuous_condition_sample_count(cfg):
+    """Validate the number of extra continuous (rain, duration) cases."""
+    value = cfg.get("continuous_condition_samples_per_batch", 0)
+    if (isinstance(value, bool) or not isinstance(value, (int, np.integer)) or
+            int(value) < 0):
+        raise ValueError(
+            "continuous_condition_samples_per_batch must be a nonnegative integer")
+    return int(value)
+
+
+def _continuous_condition_cases(rng, cfg, *, step, count=None):
+    """Sample reproducible non-grid conditions over the expert's full domain.
+
+    These cases are appended to, rather than substituted for, the fixed event
+    anchors. Alternating linear and log1p draws covers both broad high-rain
+    behaviour and the narrow low-rain end without changing legacy RNG streams
+    when the configured count is zero.
+    """
+    if count is None:
+        count = _continuous_condition_sample_count(cfg)
+    if count == 0:
+        return []
+    scales = cfg.get("scales", {})
+    required = ("rain_min_m_s", "rain_m_s", "duration_min_s", "duration_s")
+    if any(name not in scales for name in required):
+        raise ValueError(
+            "continuous condition sampling requires explicit expert rain and duration scales")
+    rain_low = float(scales["rain_min_m_s"]) * 3_600_000.
+    rain_high = float(scales["rain_m_s"]) * 3_600_000.
+    duration_low = float(scales["duration_min_s"])
+    duration_high = float(scales["duration_s"])
+    rain_reference = float(
+        scales.get("rain_log_reference_m_s", 1. / 3_600_000.)) * 3_600_000.
+    duration_reference = float(
+        scales.get("duration_log_reference_s", 3600.))
+    values = (rain_low, rain_high, duration_low, duration_high,
+              rain_reference, duration_reference)
+    if (not all(math.isfinite(value) for value in values) or
+            rain_low < 0. or rain_high <= rain_low or
+            duration_low <= 0. or duration_high <= duration_low or
+            rain_reference <= 0. or duration_reference <= 0.):
+        raise ValueError("continuous condition sampling domain is invalid")
+
+    result = []
+    for index in range(count):
+        rain_u, duration_u = rng.random(2)
+        log_draw = (int(step) + index) % 2 == 0
+        if log_draw:
+            rain_low_q = math.log1p(rain_low / rain_reference)
+            rain_high_q = math.log1p(rain_high / rain_reference)
+            rain = rain_reference * math.expm1(
+                rain_low_q + rain_u * (rain_high_q - rain_low_q))
+            duration_low_q = math.log1p(duration_low / duration_reference)
+            duration_high_q = math.log1p(duration_high / duration_reference)
+            duration = duration_reference * math.expm1(
+                duration_low_q + duration_u *
+                (duration_high_q - duration_low_q))
+            mode = "log1p"
+        else:
+            rain = rain_low + rain_u * (rain_high - rain_low)
+            duration = duration_low + duration_u * (duration_high - duration_low)
+            mode = "linear"
+        result.append({
+            "event_id": f"continuous_{int(step):06d}_{index:02d}_{mode}",
+            "split": "train",
+            "mean_intensity_mm_hr": float(rain),
+            "duration_s": float(duration),
+            "total_mm": float(rain * duration / 3600.),
+            "continuous_condition": True,
+        })
+    return result
+
+
 def _clip_gradient_norms(model, cfg):
     """Clip independent output networks without one suppressing the other."""
     limit = float(cfg["gradient_clip"])
@@ -699,6 +772,7 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                       event["mean_intensity_mm_hr"] > low_rain_limit]
     probabilities = np.asarray([math.sqrt(max(event["total_mm"], .1)) for event in training])
     probabilities /= probabilities.sum()
+    continuous_condition_count = _continuous_condition_sample_count(cfg)
     last_step = start_step - 1
     for step in range(start_step, cfg["adam_steps"] + 1):
         last_step = step
@@ -732,6 +806,11 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
             chosen = [extreme] + [training[i] for i in selected]
         else:
             raise ValueError(f"unsupported scenario_sampling: {sampling}")
+        if continuous_condition_count:
+            # Preserve all fixed zero/extreme/stratified anchors and append
+            # configurable off-grid conditions over this expert's full domain.
+            chosen += _continuous_condition_cases(
+                rng, cfg, step=step, count=continuous_condition_count)
         optimizer.zero_grad(set_to_none=True)
         robust_pde = step <= int(cfg.get("robust_pde_warmup_steps", 0))
         current_interface_weight = _scheduled_interface_weight(cfg, step)
@@ -753,6 +832,7 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                   "total_loss": float(total.detach()), "gradient_norm": grad,
                   "depth_warmup": depth_warmup,
                   "robust_pde_warmup": robust_pde,
+                  "continuous_condition_samples": continuous_condition_count,
                   "interface_weight": current_interface_weight,
                   "hydrostatic_learned_blend": current_blend,
                   **{f"{k}_loss": float(v.detach()) for k, v in parts.items()}}
