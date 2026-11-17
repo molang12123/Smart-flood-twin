@@ -21,22 +21,24 @@
 每次预测会建立新的输出目录，里面包含：
 
 - `prediction_summary.json`：雨情、时间及各帧最大/平均水深与最大流速。
+- `prediction_summary.csv`：每帧的模型、雨情、时间、文件名及最大/平均水深与最大流速，可直接交给 Unreal 或表格工具。
+- `frame_*.csv`：有效格的时间、行列、EPSG:3826 米制坐标、水深、x/y 速度与合速度；不需要从 JSON 转换。
 - `frame_*.npz`：有效格的行列、坐标、水深与速度。
 - `depth_*.tif`：保留 EPSG:3826 与原始掩膜的水深 GeoTIFF，可直接放进 QGIS。
 
 超出训练雨势或持续时间范围时程序会拒绝外推，并显示原因。
 
-## 0–800 mm/hr v9 状态
+## 0–300 mm/hr 两专家候选状态
 
-新方案由三个固定地形专家组成：low 为 0–50、medium 为 30–300、high 为 200–800 mm/hr；用户范围目标为 0–800 mm/hr、降雨 1–24 小时、模拟最长 36 小时。v9 以初始恒等的乘法修正逐步调整静水平衡深度，不再直接混合两个不一致的水深场；并使用独立深度/速度网络、掩膜硬边界、湿干前缘采样和稳定重复验证。重叠的 30–50 与 200–300 mm/hr 只用于一致性审核，实际预测按固定边界路由，不混合两个模型。
+新候选方案由两个固定地形专家组成：low 训练 0–50、主路由至 40；medium 训练 30–300、主路由大于 40 mm/hr。用户目标范围为连续 0–300 mm/hr、降雨 1–24 小时、模拟最长 36 小时。重叠的 30–50 mm/hr 只用于一致性审核，实际预测按固定边界路由，不混合两个模型。历史 0–800 失败输出会保留，但不再作为准备部署的范围。
 
 这个范围只有在以下条件全部成立后才会出现在 GUI：
 
-- low、medium、high 各自通过 PDE、连续方程、封闭边界法向速度和全域水量门槛；
-- 两个重叠区的储水差、水深相对 L2、边界速度及训练锚点/正式全 DEM 归一化偏差门槛都通过；
+- low、medium 各自通过 PDE、连续方程、封闭边界法向速度和全域水量门槛；
+- 30–50 mm/hr 重叠区的储水差、水深相对 L2 与边界速度门槛都通过；
 - 完整模型包已部署到 `models/minxiong/experts/`，且 manifest、检查点和审核证据互相匹配。
 
-训练或审核尚未通过时，GUI 会明确记录原因并继续载入 v4。不能通过手改 manifest、只复制 manifest，或放宽门槛来宣称已支持 800 mm/hr。
+训练或审核尚未通过时，GUI 会明确记录原因并继续载入 v4。不能通过手改 manifest、只复制 manifest，或放宽门槛来宣称已支持 300 mm/hr。
 
 `configs/minxiong.json` 与 `run_minxiong_vscode.py` 继续保留给开发、批次复现和训练，不再是一般用户输入预测参数的入口。
 
@@ -46,14 +48,18 @@
 
 训练成果报告位于 `reports/minxiong_training_results.html`。报告中的“通过”是研究级物理约束门槛，不是实测淹水精度认证。
 
-v6 三专家使用独立流程：
+0–300 两专家使用独立流程：
 
 ```bash
-.venv/bin/python train_minxiong_experts.py configs/minxiong_experts_0_800.json
-.venv/bin/python audit_minxiong_experts.py configs/minxiong_experts_0_800.json
+.venv/bin/python train_minxiong_experts.py configs/minxiong_experts_0_300.json
+.venv/bin/python audit_minxiong_experts.py configs/minxiong_experts_0_300.json
 ```
 
-训练每 50 步写入可恢复的 `training_state.pt`。同一配置再次运行会恢复模型、优化器、最佳权重、历史、NumPy/Torch 随机状态和累计训练时间；若地形、训练事件或关键配置改变则拒绝恢复。审核通过后，应把输出根目录中的 manifest、`low/`、`medium/`、`high/` 及审核证据作为一个整体部署到 `models/minxiong/experts/`。当前训练尚未完成验收时，不要替换 v4。
+训练每 50 步写入可恢复的 `training_state.pt`。同一配置再次运行会恢复模型、优化器、最佳权重、历史、NumPy/Torch 随机状态和累计训练时间；若地形、训练事件或关键配置改变则拒绝恢复。审核通过后，应把输出根目录中的 manifest、`low/`、`medium/` 及审核证据作为一个整体部署到 `models/minxiong/experts/`。当前训练尚未完成验收时，不要替换 v4。
+
+## Unreal Engine 画面接口
+
+运行 `.venv/bin/python run_minxiong_unreal_api.py` 后，UE5 可通过 `GET /health`、`GET /schema` 和 `POST /predict` 使用同一套范围检查与预测流程。服务直接返回 CSV、GeoTIFF 和 NPZ 的输出路径；UMG/Blueprint 的请求字段、异步调用方式、CSV 列和坐标转换见 [Unreal Engine 对接指南](UNREAL_INTEGRATION.md)。候选专家包未批准时，接口与 GUI 一样继续使用 v4 范围，不会允许 0–300 外推。
 
 ## 目前假设与仍需资料
 
