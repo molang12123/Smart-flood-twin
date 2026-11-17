@@ -39,7 +39,7 @@ def generate_report(output_dir: str | Path):
         return base64.b64encode(buffer.getvalue()).decode()
 
     status = "通过研究级物理门槛" if report["physics_training_passed"] else "未通过物理门槛"
-    rows = "".join(f"<tr><th>{name}</th><td>{value['events']}</td><td>{value['mean_pde_loss']:.6g}</td><td>{value.get('mean_continuity_loss', float('nan')):.6g}</td><td>{value.get('rms_boundary_normal_velocity_m_s', float('nan')):.6g}</td><td>{value['mean_mass_loss']:.6g}</td><td>{value['worst_loss']:.6g}</td></tr>"
+    rows = "".join(f"<tr><th>{name}</th><td>{value['events']}</td><td>{value['mean_pde_loss']:.6g}</td><td>{value.get('mean_continuity_loss', float('nan')):.6g}</td><td>{value.get('mean_interface_loss', 0.):.6g}</td><td>{value.get('rms_boundary_normal_velocity_m_s', float('nan')):.6g}</td><td>{value['mean_mass_loss']:.6g}</td><td>{value['worst_loss']:.6g}</td></tr>"
                    for name, value in report["splits"].items())
     assumptions = "".join(f"<li>{item}</li>" for item in report["assumptions"])
     worst_pde = report.get("worst_all_event_pde_loss")
@@ -50,6 +50,9 @@ def generate_report(output_dir: str | Path):
     worst_boundary = report.get("worst_all_event_boundary_rms_normal_velocity_m_s")
     worst_boundary_text = ("未計算" if worst_boundary is None
                            else f"{worst_boundary:.6g}")
+    worst_interface = report.get("worst_all_event_interface_loss")
+    worst_interface_text = ("未計算" if worst_interface is None
+                            else f"{worst_interface:.6g}")
     event_count = sum(int(value["events"]) for value in report["splits"].values())
     architecture = {
         "network_architecture": report.get("network_architecture", "plain"),
@@ -61,14 +64,28 @@ def generate_report(output_dir: str | Path):
         "conditioned_velocity_scale_epsilon_m_s": report.get(
             "conditioned_velocity_scale_epsilon_m_s", 1e-3),
     }
+    interface_metrics = {
+        name: {
+            "combined": value.get("mean_interface_loss", 0.),
+            "reconstructed_depth": value.get(
+                "mean_interface_depth_loss", 0.),
+            "normal_mass_flux": value.get(
+                "mean_interface_normal_flux_loss", 0.),
+            "tangential_mass_flux": value.get(
+                "mean_interface_tangential_flux_loss", 0.),
+        }
+        for name, value in report["splits"].items()
+    }
     html = f"""<!doctype html><html lang='zh-Hant'><meta charset='utf-8'><title>民雄 PINN 訓練成果</title>
 <style>body{{font:16px/1.6 system-ui;max-width:1050px;margin:35px auto;padding:0 20px;color:#17202a}}h1,h2{{color:#174a6e}}.status{{padding:14px;background:#eef7f1;border-left:5px solid #29804b}}table{{border-collapse:collapse;width:100%}}th,td{{padding:8px;border:1px solid #ccd6dd;text-align:right}}th:first-child{{text-align:left}}img{{max-width:100%}}code{{background:#eef2f5;padding:2px 5px}}</style>
 <h1>民雄固定地形參數化 PINN 訓練成果</h1><p class='status'><b>{status}</b><br>完成 {report['completed_steps']} 步，耗時 {report['elapsed_s']:.1f} 秒；最佳驗證 loss {report['best_validation_loss']:.6g}。</p>
-<h2>獨立事件評估</h2><table><tr><th>資料組</th><th>事件數</th><th>平均 PDE loss</th><th>平均連續方程 loss</th><th>邊界法向速度 RMS (m/s)</th><th>平均水量 loss</th><th>最差總 loss</th></tr>{rows}</table>
-<p>全部 {event_count} 個事件中的最差水量 loss：<b>{report['worst_all_event_mass_loss']:.6g}</b>；最差 PDE loss：<b>{worst_pde_text}</b>；最差連續方程 loss：<b>{worst_continuity_text}</b>；最差邊界法向速度 RMS：<b>{worst_boundary_text} m/s</b>。驗證與測試事件沒有加入參數更新。</p>
+<h2>獨立事件評估</h2><table><tr><th>資料組</th><th>事件數</th><th>平均 PDE loss</th><th>平均連續方程 loss</th><th>平均界面 loss</th><th>邊界法向速度 RMS (m/s)</th><th>平均水量 loss</th><th>最差總 loss</th></tr>{rows}</table>
+<p>全部 {event_count} 個事件中的最差水量 loss：<b>{report['worst_all_event_mass_loss']:.6g}</b>；最差 PDE loss：<b>{worst_pde_text}</b>；最差連續方程 loss：<b>{worst_continuity_text}</b>；最差界面 loss：<b>{worst_interface_text}</b>；最差邊界法向速度 RMS：<b>{worst_boundary_text} m/s</b>。驗證與測試事件沒有加入參數更新。</p>
 <img src='data:image/png;base64,{figure_data('history')}'><img src='data:image/png;base64,{figure_data('events')}'>
 <h2>固定地形</h2><pre>{json.dumps(report['terrain'], ensure_ascii=False, indent=2)}</pre>
 <h2>模型結構與實驗開關</h2><pre>{json.dumps(architecture, ensure_ascii=False, indent=2)}</pre>
+<h2>水靜力界面一致性</h2><pre>{json.dumps(report.get('interface_consistency', {}), ensure_ascii=False, indent=2)}</pre>
+<pre>{json.dumps(interface_metrics, ensure_ascii=False, indent=2)}</pre>
 <h2>驗收抽樣</h2><pre>{json.dumps(report.get('evaluation_sampling', {}), ensure_ascii=False, indent=2)}</pre>
 <h2>水量約束</h2><p>{report.get('mass_constraint_method', '未記錄')}</p>
 <h2>目前物理假設</h2><ul>{assumptions}</ul>

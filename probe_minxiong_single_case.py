@@ -20,10 +20,10 @@ DURATION_HR = 6.0
 def single_case_setup(physics="finite_volume"):
     if physics not in {"finite_volume", "strong", "strong_finetune",
                        "strong_local", "strong_local_finetune",
-                       "strong_local_wide"}:
+                       "strong_local_wide", "strong_balanced"}:
         raise ValueError(
             "physics must be finite_volume, strong, strong_finetune, strong_local, "
-            "strong_local_finetune, or strong_local_wide")
+            "strong_local_finetune, strong_local_wide, or strong_balanced")
     master = probe_config("uniform_strict")
     expert = master["experts"][0]
     cfg = copy.deepcopy(master["training"])
@@ -38,7 +38,8 @@ def single_case_setup(physics="finite_volume"):
         "expert_name": "single_5mm_hr_6hr",
     })
     if physics in {"strong", "strong_finetune", "strong_local",
-                   "strong_local_finetune", "strong_local_wide"}:
+                   "strong_local_finetune", "strong_local_wide",
+                   "strong_balanced"}:
         cfg.update({
             "adam_steps": 6000,
             "physics_form": "strong",
@@ -59,6 +60,33 @@ def single_case_setup(physics="finite_volume"):
             "layers": 8,
             "expert_name": "single_5mm_hr_6hr_strong_local_wide",
         })
+    if physics == "strong_balanced":
+        cfg.update({
+            "adam_steps": 1000,
+            "width": 192,
+            "layers": 8,
+            "network_architecture": "residual",
+            "terrain_local_coordinates": False,
+            "terrain_local_plane_feature": True,
+            "conditioned_velocity_scale": True,
+            "interior_points": 512,
+            "validation_interior_points": 1024,
+            "final_evaluation_interior_points": 2048,
+            "interface_points": 256,
+            "interface_high_relief_fraction": 0.5,
+            "interface_h_wet_m": 0.001,
+            "interface_start_step": 100,
+            "interface_ramp_steps": 300,
+            "expert_name": "single_5mm_hr_6hr_strong_balanced",
+        })
+        cfg["loss_weights"] = dict(cfg["loss_weights"], interface=0.2)
+        cfg["success_thresholds"] = dict(
+            cfg["success_thresholds"],
+            test_mean_interface_depth_loss=0.02,
+            test_mean_interface_normal_flux_loss=0.05,
+            test_mean_interface_tangential_flux_loss=0.05,
+            worst_all_event_interface_loss=0.1,
+        )
     if physics == "strong_finetune":
         initial = (ROOT / "outputs" / "minxiong" / "v10_probes" /
                    "single_5x6_strong" / "model.pt")
@@ -114,6 +142,7 @@ def single_case_setup(physics="finite_volume"):
         "strong_local": "single_5x6_strong_local",
         "strong_local_finetune": "single_5x6_strong_local_finetune",
         "strong_local_wide": "single_5x6_strong_local_wide",
+        "strong_balanced": "single_5x6_strong_balanced",
     }
     suffix = suffixes[physics]
     output = ROOT / "outputs" / "minxiong" / "v10_probes" / suffix

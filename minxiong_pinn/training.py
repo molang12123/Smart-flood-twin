@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 
 from flood_pinn.physics import residuals
 from .model import ConditionalFloodPINN
@@ -146,6 +147,174 @@ def _hydrostatic_face(left, right, z_left, z_right, *, axis, centre_side,
     return flux + correction_vector
 
 
+def _interface_times(rng, count, end_s, duration_s):
+    """Stratify interface traces across rain and recession phases."""
+    times = rng.uniform(0., end_s, count)
+    duration = min(float(duration_s), float(end_s))
+    if 0. < duration < end_s and count >= 4:
+        half = count // 2
+        times[:half] = rng.uniform(0., duration, half)
+        times[half:] = rng.uniform(duration, end_s, count - half)
+        epsilon = max(1e-3, min(duration, end_s - duration) * 1e-5)
+        times[-2:] = duration - epsilon, duration + epsilon
+    return times
+
+
+def _interface_consistency_loss(model, terrain, case, rng, cfg):
+    """Return robust wet-wet jumps of Audusse-reconstructed face traces.
+
+    Raw depth must not be continuous across a raster bed step.  Both traces
+    are therefore reconstructed onto the higher face bed before comparing
+    depth and discharge.  Wet/dry and dry/dry faces are intentionally omitted;
+    their discontinuities require a conservative Riemann/finite-volume term,
+    not a smooth-trace penalty.
+    """
+    count = cfg.get("interface_points", 128)
+    if (isinstance(count, bool) or not isinstance(count, (int, np.integer)) or
+            int(count) <= 0):
+        raise ValueError("interface_points must be a positive integer")
+    count = int(count)
+    relief_fraction = cfg.get(
+        "interface_high_relief_fraction",
+        cfg.get("high_relief_fraction", 0.))
+    h_wet = cfg.get(
+        "interface_h_wet_m", cfg.get("h_wet", cfg["h_regularization_m"]))
+    try:
+        h_wet = float(h_wet)
+    except (TypeError, ValueError):
+        h_wet = float("nan")
+    if not math.isfinite(h_wet) or h_wet <= 0.:
+        raise ValueError("interface h_wet must be positive and finite")
+    end_s = float(cfg["time_end_s"])
+    duration = float(case["duration_s"])
+    rate = float(case["mean_intensity_mm_hr"]) / 3_600_000.
+    if (not math.isfinite(end_s) or end_s <= 0. or
+            not math.isfinite(duration) or duration <= 0. or
+            not math.isfinite(rate) or rate < 0.):
+        raise ValueError("interface event time and rainfall must be finite and valid")
+
+    faces = terrain.sample_interior_faces(
+        rng, count, high_relief_fraction=relief_fraction)
+    xy = np.asarray(faces["xy"], dtype=np.float64)
+    normals = np.asarray(faces["normal"], dtype=np.float64)
+    left_z = np.asarray(faces["left_z"], dtype=np.float64)
+    right_z = np.asarray(faces["right_z"], dtype=np.float64)
+    if (xy.shape != (count, 2) or normals.shape != (count, 2) or
+            left_z.shape != (count,) or right_z.shape != (count,) or
+            not np.isfinite(xy).all() or not np.isfinite(normals).all() or
+            not np.isfinite(left_z).all() or not np.isfinite(right_z).all() or
+            not np.allclose(np.linalg.norm(normals, axis=1), 1.)):
+        raise ValueError("interior face sampler returned invalid geometry")
+
+    epsilon = min(float(terrain.dx), float(terrain.dy)) * 1e-6
+    left_xy, right_xy = xy - epsilon * normals, xy + epsilon * normals
+    times = _interface_times(rng, count, end_s, duration)
+    conditions = np.column_stack((times, np.full(count, rate),
+                                  np.full(count, duration)))
+    left_points = np.column_stack((left_xy, conditions))
+    right_points = np.column_stack((right_xy, conditions))
+    states = model(_tensor(np.concatenate((left_points, right_points), axis=0)))
+    if states.shape != (2 * count, 3) or not torch.isfinite(states).all():
+        raise FloatingPointError("model returned invalid interface states")
+    left, right = states[:count], states[count:]
+    h_left, u_left, v_left = left.unbind(dim=1)
+    h_right, u_right, v_right = right.unbind(dim=1)
+    z_left = states.new_tensor(left_z)
+    z_right = states.new_tensor(right_z)
+    face_bed = torch.maximum(z_left, z_right)
+    reconstructed_left_h = torch.relu(h_left + z_left - face_bed)
+    reconstructed_right_h = torch.relu(h_right + z_right - face_bed)
+    wet_wet = ((reconstructed_left_h > h_wet) &
+               (reconstructed_right_h > h_wet))
+
+    zero = states.sum() * 0.
+    if not bool(torch.any(wet_wet).item()):
+        return {"interface": zero, "interface_depth": zero,
+                "interface_normal_flux": zero,
+                "interface_tangential_flux": zero}
+
+    normal = states.new_tensor(normals)
+    tangent = torch.stack((-normal[:, 1], normal[:, 0]), dim=1)
+    left_velocity = torch.stack((u_left, v_left), dim=1)
+    right_velocity = torch.stack((u_right, v_right), dim=1)
+    left_normal = (left_velocity * normal).sum(dim=1)
+    right_normal = (right_velocity * normal).sum(dim=1)
+    left_tangent = (left_velocity * tangent).sum(dim=1)
+    right_tangent = (right_velocity * tangent).sum(dim=1)
+    normal_jump = (reconstructed_left_h * left_normal -
+                   reconstructed_right_h * right_normal)
+    tangent_jump = (reconstructed_left_h * left_tangent -
+                    reconstructed_right_h * right_tangent)
+
+    accumulated = states.new_tensor(rate * np.minimum(times, duration))
+    depth_reference = torch.maximum(
+        .5 * (reconstructed_left_h + reconstructed_right_h).detach(),
+        accumulated)
+    depth_reference = depth_reference.clamp_min(h_wet)
+    discharge_reference = (depth_reference *
+                           torch.sqrt(9.81 * depth_reference)).clamp_min(
+                               h_wet * math.sqrt(9.81 * h_wet))
+
+    def huber(jump, reference):
+        normalized = (jump / reference)[wet_wet]
+        return F.smooth_l1_loss(
+            normalized, torch.zeros_like(normalized), reduction="mean", beta=1.)
+
+    depth = huber(reconstructed_left_h - reconstructed_right_h,
+                  depth_reference)
+    normal_flux = huber(normal_jump, discharge_reference)
+    tangential_flux = huber(tangent_jump, discharge_reference)
+    combined = depth + normal_flux + .25 * tangential_flux
+    return {"interface": combined, "interface_depth": depth,
+            "interface_normal_flux": normal_flux,
+            "interface_tangential_flux": tangential_flux}
+
+
+def _scheduled_interface_weight(cfg, step=None):
+    """Return the interface target weight or its training curriculum value."""
+    target = cfg.get(
+        "interface_loss_weight", cfg.get("loss_weights", {}).get("interface", 0.))
+    try:
+        target = float(target)
+    except (TypeError, ValueError):
+        target = float("nan")
+    start = cfg.get("interface_start_step", 0)
+    ramp = cfg.get("interface_ramp_steps", 0)
+    if not math.isfinite(target) or target < 0.:
+        raise ValueError("interface loss weight must be finite and nonnegative")
+    if (isinstance(start, bool) or not isinstance(start, (int, np.integer)) or
+            int(start) < 0 or isinstance(ramp, bool) or
+            not isinstance(ramp, (int, np.integer)) or int(ramp) < 0):
+        raise ValueError("interface curriculum steps must be nonnegative integers")
+    if step is None:
+        return target
+    if step <= int(start):
+        return 0.
+    if int(ramp) == 0:
+        return target
+    return target * min(1., (step - int(start)) / int(ramp))
+
+
+def _interface_thresholds_pass(thresholds, test, worst):
+    """Apply only explicitly configured interface deployment gates."""
+    values = {
+        "test_mean_interface_loss": test["mean_interface_loss"],
+        "test_mean_interface_depth_loss": test["mean_interface_depth_loss"],
+        "test_mean_interface_normal_flux_loss": test[
+            "mean_interface_normal_flux_loss"],
+        "test_mean_interface_tangential_flux_loss": test[
+            "mean_interface_tangential_flux_loss"],
+        "worst_all_event_interface_loss": worst["interface"],
+        "worst_all_event_interface_depth_loss": worst["depth"],
+        "worst_all_event_interface_normal_flux_loss": worst["normal_flux"],
+        "worst_all_event_interface_tangential_flux_loss": worst[
+            "tangential_flux"],
+    }
+    return all(
+        value <= float(thresholds[name])
+        for name, value in values.items() if name in thresholds)
+
+
 def _fv_residuals(model, terrain, case, rng, cfg):
     """Well-balanced finite-volume residual on active DEM cells."""
     count = cfg["interior_points"]
@@ -209,8 +378,18 @@ def _fv_residuals(model, terrain, case, rng, cfg):
     return torch.stack((mass, momentum_x, momentum_y), dim=1), rate, duration
 
 
-def _loss(model, terrain, cases, rng, cfg, *, robust_pde=False):
-    pde_losses, pde_objectives, pde_components, bc_losses, mass_losses = [], [], [], [], []
+def _loss(model, terrain, cases, rng, cfg, *, robust_pde=False,
+          interface_weight=None):
+    pde_losses, pde_objectives, pde_components = [], [], []
+    bc_losses, mass_losses, interface_losses = [], [], []
+    if interface_weight is None:
+        interface_weight = _scheduled_interface_weight(cfg)
+    try:
+        interface_weight = float(interface_weight)
+    except (TypeError, ValueError):
+        interface_weight = float("nan")
+    if not math.isfinite(interface_weight) or interface_weight < 0.:
+        raise ValueError("interface loss weight must be finite and nonnegative")
     end_s = cfg["time_end_s"]
     for case in cases:
         if cfg.get("physics_form", "strong") == "finite_volume":
@@ -239,6 +418,17 @@ def _loss(model, terrain, cases, rng, cfg, *, robust_pde=False):
             torch.log1p(normalized_square).mean() if robust_pde
             else normalized_square.mean())
         pde_components.append(normalized_square.mean(dim=0))
+
+        if interface_weight > 0.:
+            interface_losses.append(
+                _interface_consistency_loss(model, terrain, case, rng, cfg))
+        else:
+            zero = raw.sum() * 0.
+            interface_losses.append({
+                "interface": zero, "interface_depth": zero,
+                "interface_normal_flux": zero,
+                "interface_tangential_flux": zero,
+            })
 
         xy, normals = terrain.sample_boundary(rng, cfg["boundary_points"])
         b = np.empty((len(xy), 5)); b[:, :2] = xy
@@ -279,16 +469,22 @@ def _loss(model, terrain, cases, rng, cfg, *, robust_pde=False):
             event_mass.append(((mean_depth - expected) / max(expected, 1e-6)).square())
         mass_losses.append(torch.stack(event_mass).mean())
     component_mean = torch.stack(pde_components).mean(dim=0)
+    interface_parts = {
+        name: torch.stack([row[name] for row in interface_losses]).mean()
+        for name in interface_losses[0]
+    }
     parts = {"pde": torch.stack(pde_losses).mean(),
              "pde_objective": torch.stack(pde_objectives).mean(),
              "pde_continuity": component_mean[0],
              "pde_momentum_x": component_mean[1],
              "pde_momentum_y": component_mean[2],
              "boundary": torch.stack(bc_losses).mean(),
-             "mass": torch.stack(mass_losses).mean()}
+             "mass": torch.stack(mass_losses).mean(),
+             **interface_parts}
     total = (cfg["loss_weights"]["pde"] * parts["pde_objective"] +
              cfg["loss_weights"]["boundary"] * parts["boundary"] +
-             cfg["loss_weights"]["mass"] * parts["mass"])
+             cfg["loss_weights"]["mass"] * parts["mass"] +
+             float(interface_weight) * parts["interface"])
     return total, parts
 
 
@@ -538,8 +734,10 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
             raise ValueError(f"unsupported scenario_sampling: {sampling}")
         optimizer.zero_grad(set_to_none=True)
         robust_pde = step <= int(cfg.get("robust_pde_warmup_steps", 0))
+        current_interface_weight = _scheduled_interface_weight(cfg, step)
         total, parts = _loss(model, terrain, chosen, rng, cfg,
-                             robust_pde=robust_pde)
+                             robust_pde=robust_pde,
+                             interface_weight=current_interface_weight)
         if not torch.isfinite(total): raise FloatingPointError("training loss became nonfinite")
         total.backward()
         depth_warmup = step <= int(cfg.get("depth_warmup_steps", 0))
@@ -555,6 +753,7 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                   "total_loss": float(total.detach()), "gradient_norm": grad,
                   "depth_warmup": depth_warmup,
                   "robust_pde_warmup": robust_pde,
+                  "interface_weight": current_interface_weight,
                   "hydrostatic_learned_blend": current_blend,
                   **{f"{k}_loss": float(v.detach()) for k, v in parts.items()}}
         if depth_grad is not None:
@@ -654,6 +853,10 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                                 "mean_continuity_loss": float(np.mean([r["pde_continuity_loss"] for r in subset])),
                                 "mean_momentum_x_loss": float(np.mean([r["pde_momentum_x_loss"] for r in subset])),
                                 "mean_momentum_y_loss": float(np.mean([r["pde_momentum_y_loss"] for r in subset])),
+                                "mean_interface_loss": float(np.mean([r["interface_loss"] for r in subset])),
+                                "mean_interface_depth_loss": float(np.mean([r["interface_depth_loss"] for r in subset])),
+                                "mean_interface_normal_flux_loss": float(np.mean([r["interface_normal_flux_loss"] for r in subset])),
+                                "mean_interface_tangential_flux_loss": float(np.mean([r["interface_tangential_flux_loss"] for r in subset])),
                                 "mean_boundary_loss": mean_boundary_loss,
                                 "rms_boundary_normal_velocity_m_s": velocity_scale * math.sqrt(mean_boundary_loss),
                                 "mean_mass_loss": float(np.mean([r["mass_loss"] for r in subset]))}
@@ -682,6 +885,19 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
                   model, "conditioned_velocity_scale_epsilon_m_s", 1e-3)),
               "network_architecture": getattr(
                   model, "network_architecture", "plain"),
+              "interface_consistency": {
+                  "target_weight": _scheduled_interface_weight(cfg),
+                  "start_step": int(cfg.get("interface_start_step", 0)),
+                  "ramp_steps": int(cfg.get("interface_ramp_steps", 0)),
+                  "points": int(cfg.get("interface_points", 128)),
+                  "high_relief_fraction": float(cfg.get(
+                      "interface_high_relief_fraction",
+                      cfg.get("high_relief_fraction", 0.))),
+                  "h_wet_m": float(cfg.get(
+                      "interface_h_wet_m",
+                      cfg.get("h_wet", cfg["h_regularization_m"]))),
+                  "method": "wet-wet Audusse reconstructed depth and discharge trace jumps",
+              },
               "evaluation_sampling": {
                   "wet_dry_front_fraction": float(cfg.get("wet_dry_front_fraction", 0.)),
                   "wet_dry_front_window_cells": int(cfg.get("wet_dry_front_window_cells", 256)),
@@ -702,13 +918,31 @@ def train(terrain, events, cfg: dict, output_dir: str | Path):
     worst_mass = max(float(row["mass_loss"]) for row in all_metrics)
     worst_pde = max(float(row["pde_loss"]) for row in all_metrics)
     worst_continuity = max(float(row["pde_continuity_loss"]) for row in all_metrics)
+    worst_interface = max(float(row["interface_loss"]) for row in all_metrics)
+    worst_interface_depth = max(
+        float(row["interface_depth_loss"]) for row in all_metrics)
+    worst_interface_normal = max(
+        float(row["interface_normal_flux_loss"]) for row in all_metrics)
+    worst_interface_tangential = max(
+        float(row["interface_tangential_flux_loss"]) for row in all_metrics)
     worst_boundary = velocity_scale * math.sqrt(
         max(float(row["boundary_loss"]) for row in all_metrics))
     report["worst_all_event_mass_loss"] = worst_mass
     report["worst_all_event_pde_loss"] = worst_pde
     report["worst_all_event_continuity_loss"] = worst_continuity
+    report["worst_all_event_interface_loss"] = worst_interface
+    report["worst_all_event_interface_depth_loss"] = worst_interface_depth
+    report["worst_all_event_interface_normal_flux_loss"] = worst_interface_normal
+    report["worst_all_event_interface_tangential_flux_loss"] = worst_interface_tangential
     report["worst_all_event_boundary_rms_normal_velocity_m_s"] = worst_boundary
-    report["physics_training_passed"] = bool(test["mean_pde_loss"] <= thresholds["test_mean_pde_loss"] and
+    interface_passed = _interface_thresholds_pass(
+        thresholds, test,
+        {"interface": worst_interface, "depth": worst_interface_depth,
+         "normal_flux": worst_interface_normal,
+         "tangential_flux": worst_interface_tangential})
+    report["interface_training_passed"] = bool(interface_passed)
+    report["physics_training_passed"] = bool(interface_passed and
+                                             test["mean_pde_loss"] <= thresholds["test_mean_pde_loss"] and
                                              test["mean_continuity_loss"] <= thresholds.get("test_mean_continuity_loss", math.inf) and
                                              test["rms_boundary_normal_velocity_m_s"] <= thresholds.get("test_boundary_rms_normal_velocity_m_s", math.inf) and
                                              test["mean_mass_loss"] <= thresholds["test_mean_mass_loss"] and
