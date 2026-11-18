@@ -8,6 +8,7 @@ and overlap gate passes.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -20,6 +21,14 @@ from .terrain import MaskedRasterTerrain
 
 
 SUPPORTED_EXPERT_NAMES = ("low", "medium", "high")
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _expert_names(master):
@@ -272,31 +281,60 @@ def _configured_overlaps(master):
 
 def build_approved_manifest(master, terrain, checkpoints, audit_report, output_root):
     """Build an activation manifest only after every deployment gate passes."""
-    individual_passed = all(item["physics_training_passed"]
-                            for item in audit_report["experts"])
-    overlap_passed = bool(audit_report["overlap"]["passed"])
+    names = _expert_names(master)
+    individual = audit_report.get("experts")
+    individual_passed = (
+        isinstance(individual, list) and len(individual) == len(names) and
+        all(isinstance(item, dict) and
+            item.get("model_id") == name and
+            item.get("physics_training_passed") is True
+            for name, item in zip(names, individual)))
+    overlap = audit_report.get("overlap")
+    overlap_passed = (isinstance(overlap, dict) and
+                      overlap.get("passed") is True)
     continuous_required = bool(
         master.get("continuous_domain_audit", {}).get("enabled", False))
     continuous = audit_report.get("continuous_domain")
-    continuous_passed = (not continuous_required or
-                         (isinstance(continuous, dict) and
-                          continuous.get("passed") is True))
-    if not individual_passed or not overlap_passed or not continuous_passed:
+    continuous_passed = (continuous_required and
+                         isinstance(continuous, dict) and
+                         continuous.get("passed") is True)
+    top_level_passed = all(
+        audit_report.get(field) is True
+        for field in ("activation_approved", "physics_training_passed",
+                      "overlap_consistency_passed",
+                      "continuous_domain_passed"))
+    if (not individual_passed or not overlap_passed or
+            not continuous_passed or not top_level_passed or
+            audit_report.get("terrain_fingerprint") != terrain.fingerprint):
         raise ValueError("cannot approve an expert bundle whose audit gates did not pass")
     rain_min = min(float(item["intensities_mm_hr"][0]) for item in master["experts"])
     rain_max = max(float(item["intensities_mm_hr"][-1]) for item in master["experts"])
     duration_min = min(map(float, master["durations_hr"])) * 3600.
     duration_max = max(map(float, master["durations_hr"])) * 3600.
-    names = _expert_names(master)
     experts = []
-    for name in names:
+    for name, evidence in zip(names, individual):
         domain = checkpoints[name]["training_rain_domain"]
         model_path = output_root / name / "model.pt"
+        if not model_path.is_file():
+            raise FileNotFoundError(
+                f"expert checkpoint does not exist: {model_path}")
+        actual_hash = _sha256(model_path)
+        if evidence.get("checkpoint_sha256") != actual_hash:
+            raise ValueError(
+                f"expert {name!r} checkpoint differs from its audit evidence")
         experts.append({
             "model_id": name,
             "path": model_path.relative_to(output_root).as_posix(),
+            "sha256": actual_hash,
             "trained_rainfall_mm_hr": list(map(float, domain["rainfall_mm_hr"])),
         })
+    audit_path = output_root / "overlap_audit.json"
+    try:
+        saved_audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read saved expert audit evidence: {exc}") from exc
+    if saved_audit != audit_report:
+        raise ValueError("saved expert audit evidence differs from the approved audit")
     routing = master["routing"]
     manifest_routing = {
         "low_max_mm_hr": float(routing["low_max_mm_hr"]),
@@ -310,6 +348,7 @@ def build_approved_manifest(master, terrain, checkpoints, audit_report, output_r
         "activation_approved": True,
         "physics_training_passed": True,
         "overlap_consistency_passed": True,
+        "continuous_domain_audit_passed": True,
         "terrain_fingerprint": terrain.fingerprint,
         "time_s": float(master["training"]["time_end_s"]),
         "training_rain_domain": {
@@ -318,10 +357,9 @@ def build_approved_manifest(master, terrain, checkpoints, audit_report, output_r
         },
         "routing": manifest_routing,
         "audit_file": "overlap_audit.json",
+        "audit_sha256": _sha256(audit_path),
         "experts": experts,
     }
-    if continuous_required:
-        manifest["continuous_domain_audit_passed"] = True
     return manifest
 
 
@@ -352,6 +390,7 @@ def audit_and_publish(config_path, *, model_loader=load_model):
             "physics_training_passed": report.get("physics_training_passed") is True,
             "completed_steps": report.get("completed_steps"),
             "best_validation_loss": report.get("best_validation_loss"),
+            "checkpoint_sha256": _sha256(folder / "model.pt"),
             "report": str(report_path),
         })
 

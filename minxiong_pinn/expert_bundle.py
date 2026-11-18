@@ -6,6 +6,8 @@ manifest must explicitly record individual physics and overlap acceptance.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import math
 from pathlib import Path
@@ -109,7 +111,8 @@ def _manifest(path: Path) -> dict:
     if value.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"unsupported expert bundle schema: {value.get('schema_version')!r}")
     for field in ("activation_approved", "physics_training_passed",
-                  "overlap_consistency_passed"):
+                  "overlap_consistency_passed",
+                  "continuous_domain_audit_passed"):
         if value.get(field) is not True:
             raise ValueError(f"expert bundle is not approved: {field} is not true")
     if not isinstance(value.get("bundle_id"), str) or not value["bundle_id"].strip():
@@ -153,17 +156,77 @@ def _manifest(path: Path) -> dict:
     return value
 
 
-def _contained_checkpoint(manifest_path: Path, relative_path) -> Path:
+def _contained_bundle_file(manifest_path: Path, relative_path, label) -> Path:
     if not isinstance(relative_path, str) or not relative_path.strip():
-        raise ValueError("expert checkpoint path must be a nonempty relative path")
+        raise ValueError(f"expert bundle {label} path must be a nonempty relative path")
     relative = Path(relative_path)
     if relative.is_absolute():
-        raise ValueError("expert checkpoint path must be relative to the bundle")
+        raise ValueError(f"expert bundle {label} path must be relative to the bundle")
     bundle_root = manifest_path.parent.resolve()
-    checkpoint = (bundle_root / relative).resolve()
-    if checkpoint == bundle_root or bundle_root not in checkpoint.parents:
-        raise ValueError("expert checkpoint path escapes the bundle directory")
-    return checkpoint
+    target = (bundle_root / relative).resolve()
+    if target == bundle_root or bundle_root not in target.parents:
+        raise ValueError(f"expert bundle {label} path escapes the bundle directory")
+    return target
+
+
+def _contained_checkpoint(manifest_path: Path, relative_path) -> Path:
+    return _contained_bundle_file(manifest_path, relative_path, "checkpoint")
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _valid_sha256(value):
+    return (isinstance(value, str) and len(value) == 64 and
+            all(character in "0123456789abcdef" for character in value))
+
+
+def _audit_evidence(manifest_path, manifest):
+    audit_path = _contained_bundle_file(
+        manifest_path, manifest.get("audit_file"), "audit file")
+    expected_audit_hash = manifest.get("audit_sha256")
+    if not _valid_sha256(expected_audit_hash):
+        raise ValueError("expert bundle audit file sha256 is invalid")
+    try:
+        actual_audit_hash = _sha256(audit_path)
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read expert bundle audit evidence: {exc}") from exc
+    if not hmac.compare_digest(actual_audit_hash, expected_audit_hash):
+        raise ValueError("expert bundle audit file sha256 mismatch")
+    if not isinstance(audit, dict):
+        raise ValueError("expert bundle audit evidence must be a JSON object")
+    for field in ("activation_approved", "physics_training_passed",
+                  "overlap_consistency_passed", "continuous_domain_passed"):
+        if audit.get(field) is not True:
+            raise ValueError(
+                f"expert bundle audit evidence is not approved: {field} is not true")
+    if audit.get("terrain_fingerprint") != manifest["terrain_fingerprint"]:
+        raise ValueError("expert bundle audit terrain fingerprint differs from the manifest")
+    overlap = audit.get("overlap")
+    continuous = audit.get("continuous_domain")
+    if not isinstance(overlap, dict) or overlap.get("passed") is not True:
+        raise ValueError("expert bundle overlap audit evidence did not pass")
+    if not isinstance(continuous, dict) or continuous.get("passed") is not True:
+        raise ValueError("expert bundle continuous-domain audit evidence did not pass")
+    audit_experts = audit.get("experts")
+    if not isinstance(audit_experts, list):
+        raise ValueError("expert bundle audit expert evidence is missing")
+    if len(audit_experts) != len(manifest["experts"]):
+        raise ValueError("expert bundle audit expert evidence differs from the manifest")
+    for audited, declared in zip(audit_experts, manifest["experts"]):
+        if (not isinstance(audited, dict) or
+                audited.get("model_id") != declared["model_id"] or
+                audited.get("physics_training_passed") is not True or
+                audited.get("checkpoint_sha256") != declared.get("sha256")):
+            raise ValueError(
+                "expert bundle audit expert evidence differs from the manifest")
+    return audit
 
 
 def load_expert_bundle(
@@ -175,12 +238,23 @@ def load_expert_bundle(
     manifest = _manifest(path)
     if manifest["terrain_fingerprint"] != terrain.fingerprint:
         raise ValueError("expert bundle terrain fingerprint does not match this DEM/Manning setting")
+    _audit_evidence(path, manifest)
     loaded: dict[str, nn.Module] = {}
     checkpoint_domains = {}
     duration_domain = tuple(manifest["training_rain_domain"]["duration_s"])
     for entry in manifest["experts"]:
         model_id = entry["model_id"]
         checkpoint_path = _contained_checkpoint(path, entry.get("path"))
+        expected_hash = entry.get("sha256")
+        if not _valid_sha256(expected_hash):
+            raise ValueError(f"expert {model_id!r} checkpoint sha256 is invalid")
+        try:
+            actual_hash = _sha256(checkpoint_path)
+        except OSError as exc:
+            raise ValueError(
+                f"cannot read expert {model_id!r} checkpoint for sha256: {exc}") from exc
+        if not hmac.compare_digest(actual_hash, expected_hash):
+            raise ValueError(f"expert {model_id!r} checkpoint sha256 mismatch")
         model, checkpoint = model_loader(checkpoint_path, terrain)
         if checkpoint.get("terrain_fingerprint") != manifest["terrain_fingerprint"]:
             raise ValueError(f"expert {model_id!r} terrain fingerprint differs from the manifest")
@@ -230,6 +304,7 @@ def load_expert_bundle(
         "activation_approved": True,
         "physics_training_passed": True,
         "overlap_consistency_passed": True,
+        "continuous_domain_audit_passed": True,
     }
     return model, checkpoint
 

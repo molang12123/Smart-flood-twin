@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -135,6 +137,7 @@ class OverlapAuditTests(unittest.TestCase):
         master = {
             "durations_hr": [1., 24.],
             "routing": {"low_max_mm_hr": 40.},
+            "continuous_domain_audit": {"enabled": True},
             "training": {"time_end_s": 36 * 3600.},
             "experts": [
                 {"name": "low", "intensities_mm_hr": [0., 50.]},
@@ -150,19 +153,69 @@ class OverlapAuditTests(unittest.TestCase):
                 "duration_s": [3600., 86400.]}},
         }
         passed = {
-            "experts": [{"physics_training_passed": True}] * 2,
+            "activation_approved": True,
+            "physics_training_passed": True,
+            "overlap_consistency_passed": True,
+            "continuous_domain_passed": True,
+            "terrain_fingerprint": "x",
+            "experts": [
+                {"model_id": name, "physics_training_passed": True,
+                 "checkpoint_sha256": hashlib.sha256(name.encode()).hexdigest()}
+                for name in ("low", "medium")],
             "overlap": {"passed": True},
+            "continuous_domain": {"passed": True},
         }
         with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ("low", "medium"):
+                path = root / name / "model.pt"
+                path.parent.mkdir(parents=True)
+                path.write_bytes(name.encode())
+            audit_path = root / "overlap_audit.json"
+            audit_path.write_text(json.dumps(passed), encoding="utf-8")
             manifest = build_approved_manifest(
                 master, SimpleNamespace(fingerprint="x"), checkpoints,
-                passed, Path(folder))
+                passed, root)
         self.assertEqual(
             manifest["training_rain_domain"]["rainfall_mm_hr"], [0., 300.])
+        self.assertTrue(manifest["continuous_domain_audit_passed"])
         self.assertEqual(manifest["routing"], {"low_max_mm_hr": 40.})
         self.assertEqual(
             [item["model_id"] for item in manifest["experts"]],
             ["low", "medium"])
+        self.assertEqual(
+            [item["sha256"] for item in manifest["experts"]],
+            [hashlib.sha256(name.encode()).hexdigest()
+             for name in ("low", "medium")])
+        self.assertEqual(
+            manifest["audit_sha256"],
+            hashlib.sha256(json.dumps(passed).encode()).hexdigest())
+
+    def test_manifest_requires_continuous_domain_audit(self):
+        master = {
+            "durations_hr": [1., 24.],
+            "routing": {"low_max_mm_hr": 40.},
+            "training": {"time_end_s": 36 * 3600.},
+            "experts": [
+                {"name": "low", "intensities_mm_hr": [0., 50.]},
+                {"name": "medium", "intensities_mm_hr": [30., 300.]},
+            ],
+        }
+        checkpoints = {name: {"training_rain_domain": {
+            "rainfall_mm_hr": rainfall,
+            "duration_s": [3600., 86400.],
+        }} for name, rainfall in {
+            "low": [0., 50.], "medium": [30., 300.],
+        }.items()}
+        audit = {
+            "experts": [{"physics_training_passed": True}] * 2,
+            "overlap": {"passed": True},
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaisesRegex(ValueError, "did not pass"):
+                build_approved_manifest(
+                    master, SimpleNamespace(fingerprint="x"), checkpoints,
+                    audit, Path(folder))
 
 
 if __name__ == "__main__":

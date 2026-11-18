@@ -1,13 +1,16 @@
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import torch
 from torch import nn
 
-from minxiong_pinn.expert_bundle import load_expert_bundle
+import minxiong_pinn.expert_bundle as expert_bundle
+from minxiong_pinn.expert_bundle import load_expert_bundle, load_preferred_model
 from minxiong_pinn.user_input import build_prediction_request
 
 
@@ -31,13 +34,16 @@ def manifest(**changes):
         "activation_approved": True,
         "physics_training_passed": True,
         "overlap_consistency_passed": True,
+        "continuous_domain_audit_passed": True,
         "terrain_fingerprint": FINGERPRINT,
         "time_s": 36 * 3600.,
         "training_rain_domain": {
             "rainfall_mm_hr": [0., 800.], "duration_s": [3600., 24 * 3600.]},
         "routing": {"low_max_mm_hr": 40., "medium_max_mm_hr": 250.},
+        "audit_file": "overlap_audit.json",
         "experts": [
             {"model_id": name, "path": f"{name}/model.pt",
+             "sha256": hashlib.sha256(name.encode()).hexdigest(),
              "trained_rainfall_mm_hr": list(RANGES[name])}
             for name in ("low", "medium", "high")],
     }
@@ -73,9 +79,41 @@ def fake_loader(path, _terrain):
 
 
 class ExpertBundleTests(unittest.TestCase):
-    def load(self, folder, value=None):
+    def audit(self, value):
+        return {
+            "activation_approved": True,
+            "physics_training_passed": True,
+            "overlap_consistency_passed": True,
+            "continuous_domain_passed": True,
+            "terrain_fingerprint": FINGERPRINT,
+            "experts": [
+                {"model_id": item["model_id"],
+                 "physics_training_passed": True,
+                 "checkpoint_sha256": item.get("sha256")}
+                for item in value["experts"]
+            ],
+            "overlap": {"passed": True},
+            "continuous_domain": {"passed": True},
+        }
+
+    def write_bundle(self, folder, value=None, audit=None):
+        value = value or manifest()
+        folder = Path(folder)
+        for name in RANGES:
+            checkpoint = folder / name / "model.pt"
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint.write_bytes(name.encode())
+        audit_path = folder / "overlap_audit.json"
+        audit_path.write_text(
+            json.dumps(audit or self.audit(value)), encoding="utf-8")
+        value.setdefault(
+            "audit_sha256", hashlib.sha256(audit_path.read_bytes()).hexdigest())
         path = Path(folder) / "manifest.json"
-        path.write_text(json.dumps(value or manifest()), encoding="utf-8")
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    def load(self, folder, value=None, audit=None):
+        path = self.write_bundle(folder, value, audit)
         return load_expert_bundle(
             path, SimpleNamespace(fingerprint=FINGERPRINT), model_loader=fake_loader)
 
@@ -121,6 +159,86 @@ class ExpertBundleTests(unittest.TestCase):
             escaping = manifest(); escaping["experts"][0]["path"] = "../model.pt"
             with self.assertRaisesRegex(ValueError, "escapes"):
                 self.load(folder, escaping)
+
+    def test_continuous_audit_evidence_is_mandatory_and_consistent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            missing = manifest()
+            missing.pop("continuous_domain_audit_passed")
+            with self.assertRaisesRegex(ValueError, "continuous_domain"):
+                self.load(folder, missing)
+
+        cases = {
+            "top-level gate": lambda value: value.update(
+                continuous_domain_passed=False),
+            "nested overlap": lambda value: value["overlap"].update(
+                passed=False),
+            "nested continuous": lambda value: value["continuous_domain"].update(
+                passed=False),
+            "terrain": lambda value: value.update(
+                terrain_fingerprint="other-terrain"),
+            "expert": lambda value: value["experts"][0].update(
+                physics_training_passed=False),
+        }
+        for label, change in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as folder:
+                value = manifest()
+                audit = self.audit(value)
+                change(audit)
+                with self.assertRaises(ValueError):
+                    self.load(folder, value, audit)
+
+        with tempfile.TemporaryDirectory() as folder:
+            value = manifest(audit_file="../overlap_audit.json")
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                self.load(folder, value)
+
+    def test_checkpoint_sha256_is_required_and_verified_before_loading(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value = manifest()
+            value["experts"][0].pop("sha256")
+            with self.assertRaisesRegex(ValueError, "sha256 is invalid"):
+                self.load(folder, value)
+        with tempfile.TemporaryDirectory() as folder:
+            value = manifest()
+            value["experts"][0]["sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "sha256 mismatch"):
+                self.load(folder, value)
+
+    def test_audit_file_and_checkpoint_evidence_are_hash_bound(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value = manifest(audit_sha256="0" * 64)
+            with self.assertRaisesRegex(ValueError, "audit file sha256 mismatch"):
+                self.load(folder, value)
+        with tempfile.TemporaryDirectory() as folder:
+            value = manifest()
+            audit = self.audit(value)
+            audit["experts"][0]["checkpoint_sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "evidence differs"):
+                self.load(folder, value, audit)
+
+    def test_invalid_expert_bundle_still_falls_back_to_single_model(self):
+        with tempfile.TemporaryDirectory() as folder:
+            bundle = Path(folder) / "manifest.json"
+            bundle.write_text("{}", encoding="utf-8")
+            fallback_model = MarkerExpert(9)
+            fallback_checkpoint = {"training_rain_domain": {
+                "rainfall_mm_hr": [.5, 23.],
+                "duration_s": [3600., 37 * 3600.],
+            }}
+            with patch.object(
+                    expert_bundle, "load_expert_bundle",
+                    side_effect=ValueError("incomplete manifest")), patch.object(
+                    expert_bundle, "load_model",
+                    return_value=(fallback_model, fallback_checkpoint)):
+                model, checkpoint = load_preferred_model(
+                    bundle, Path(folder) / "fallback.pt",
+                    SimpleNamespace(fingerprint=FINGERPRINT))
+            self.assertIs(model, fallback_model)
+            self.assertEqual(
+                checkpoint["training_rain_domain"]["rainfall_mm_hr"],
+                [.5, 23.])
+            self.assertIn("incomplete manifest",
+                          checkpoint["bundle_fallback_reason"])
 
     def test_zero_rain_is_valid_only_when_checkpoint_includes_it(self):
         checkpoint = {"training_rain_domain": {
