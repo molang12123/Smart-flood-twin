@@ -15,6 +15,29 @@ from minxiong_pinn.training import _training_identity, train
 
 
 ROOT = Path(__file__).resolve().parent
+EXPERT_OPERATIONAL_OVERRIDE_KEYS = frozenset({
+    "adam_steps", "max_seconds", "checkpoint_interval",
+})
+
+
+def _apply_expert_operational_overrides(cfg, expert):
+    """Apply only resume-safe, per-expert run limits.
+
+    These keys are deliberately excluded from ``_training_identity``.  Model,
+    loss, sampling, seed, and physics settings cannot be changed here, so an
+    expert may be extended without silently changing its optimization problem.
+    """
+    overrides = expert.get("training_overrides", {})
+    if not isinstance(overrides, Mapping):
+        raise ValueError("expert training_overrides must be an object")
+    unknown = set(overrides) - EXPERT_OPERATIONAL_OVERRIDE_KEYS
+    if unknown:
+        names = ", ".join(sorted(map(str, unknown)))
+        raise ValueError(
+            f"expert training_overrides contains non-operational keys: {names}")
+    result = copy.deepcopy(cfg)
+    result.update(overrides)
+    return result
 
 
 def _artifact_values_equal(left, right):
@@ -150,7 +173,8 @@ def run_expert_config(master, base):
             validation_markers=markers.get("validation", (3,)),
             test_markers=markers.get("test", (7,)),
         )
-        cfg = copy.deepcopy(master["training"])
+        cfg = _apply_expert_operational_overrides(
+            master["training"], expert)
         cfg["seed"] += index * 1000
         cfg["extreme_total_mm"] = rates[-1] * max(master["durations_hr"]) * .9
         cfg["expert_name"] = expert["name"]

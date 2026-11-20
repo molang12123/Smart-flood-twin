@@ -42,7 +42,10 @@
     {
       "name": "medium",
       "intensities_mm_hr": [30, 50, 75, 100, 150, 200, 250, 300],
-      "velocity_m_s": 10.0
+      "velocity_m_s": 10.0,
+      "training_overrides": {
+        "adam_steps": 30000
+      }
     }
   ],
   "training": {

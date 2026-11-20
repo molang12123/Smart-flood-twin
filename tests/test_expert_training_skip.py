@@ -83,6 +83,30 @@ class CompletedExpertSkipTests(unittest.TestCase):
             self.assertIsNone(expert_training._load_completed_expert_report(
                 self.terrain, self.events, cfg, folder))
 
+    def test_expert_can_extend_only_resume_safe_operational_limits(self):
+        base = {
+            "adam_steps": 10, "max_seconds": 100.,
+            "checkpoint_interval": 5, "learning_rate": 3e-5,
+        }
+        expert = {"training_overrides": {
+            "adam_steps": 20, "max_seconds": 200.,
+        }}
+        extended = expert_training._apply_expert_operational_overrides(
+            base, expert)
+        self.assertEqual(extended["adam_steps"], 20)
+        self.assertEqual(extended["max_seconds"], 200.)
+        self.assertEqual(extended["learning_rate"], 3e-5)
+        self.assertEqual(base["adam_steps"], 10)
+
+        for invalid in ({"learning_rate": 1e-5}, {"seed": 99}):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                    ValueError, "non-operational"):
+                expert_training._apply_expert_operational_overrides(
+                    base, {"training_overrides": invalid})
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            expert_training._apply_expert_operational_overrides(
+                base, {"training_overrides": ["adam_steps"]})
+
     def test_any_inconsistent_artifact_prevents_skip(self):
         cases = {
             "state schema": {"state_changes": lambda value: value.update(
