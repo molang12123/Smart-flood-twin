@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "bundle_id": "minxiong-experts_strong_0_300_v12_idealized",
+  "activation_approved": true,
+  "physics_training_passed": true,
+  "overlap_consistency_passed": true,
+  "continuous_domain_audit_passed": true,
+  "terrain_fingerprint": "dd26d2e5e069ba57311103a448bb62290b797d1f1593156c47a2c5057d142ab3",
+  "time_s": 129600.0,
+  "training_rain_domain": {
+    "rainfall_mm_hr": [
+      0.0,
+      300.0
+    ],
+    "duration_s": [
+      3600.0,
+      86400.0
+    ]
+  },
+  "routing": {
+    "low_max_mm_hr": 40.0,
+    "policy": "linear_blend",
+    "blend_ranges_mm_hr": [
+      [
+        30.0,
+        50.0
+      ]
+    ]
+  },
+  "acceptance_profile": "idealized_theoretical_v1",
+  "audit_file": "overlap_audit.json",
+  "audit_sha256": "890041829fae1093dae40d845b2272d9c3733f56730a062edb11ae12e8a5a23d",
+  "experts": [
+    {
+      "model_id": "low",
+      "path": "low/model.pt",
+      "sha256": "ed498fd98577c0af9a270ddc995fc7ba5ffea2356fc69f4bcc5e05bdc6360344",
+      "trained_rainfall_mm_hr": [
+        0.0,
+        50.0
+      ]
+    },
+    {
+      "model_id": "medium",
+      "path": "medium/model.pt",
+      "sha256": "540e0641200c4abf41f25767d3c3cbb988e40f22212d318eb6186ae7eb0543e5",
+      "trained_rainfall_mm_hr": [
+        30.0,
+        300.0
+      ]
+    }
+  ]
+}

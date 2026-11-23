@@ -1,3 +1,4 @@
+import csv
 import hashlib
 import json
 from pathlib import Path
@@ -11,6 +12,7 @@ from torch import nn
 
 import minxiong_pinn.expert_bundle as expert_bundle
 from minxiong_pinn.expert_bundle import load_expert_bundle, load_preferred_model
+from minxiong_pinn.predict import _write_summary_csv, predict
 from minxiong_pinn.user_input import build_prediction_request
 
 
@@ -62,6 +64,17 @@ def two_expert_manifest(**changes):
         "routing": {"low_max_mm_hr": 40.},
         "experts": value["experts"][:2],
     })
+    value.update(changes)
+    return value
+
+
+def blended_two_expert_manifest(**changes):
+    value = two_expert_manifest()
+    value["routing"] = {
+        "low_max_mm_hr": 40.,
+        "policy": "linear_blend",
+        "blend_ranges_mm_hr": [[30., 50.]],
+    }
     value.update(changes)
     return value
 
@@ -151,6 +164,101 @@ class ExpertBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside"):
                 model.model_id_for_rainfall(300.001)
 
+    def test_linear_blend_is_convex_continuous_and_keeps_primary_label(self):
+        with tempfile.TemporaryDirectory() as folder:
+            model, checkpoint = self.load(
+                folder, blended_two_expert_manifest())
+            self.assertEqual(checkpoint["routing"], {
+                "low_max_mm_hr": 40.,
+                "policy": "linear_blend",
+                "blend_ranges_mm_hr": [[30., 50.]],
+            })
+            self.assertEqual(model.model_id_for_rainfall(40.), "low")
+            self.assertEqual(model.model_id_for_rainfall(40.001), "medium")
+            self.assertEqual(model.routing_label_for_rainfall(20.), "low")
+            self.assertEqual(model.routing_label_for_rainfall(40.), "low+medium")
+            self.assertEqual(
+                model.expert_weights_for_rainfall(35.),
+                {"low": .75, "medium": .25})
+
+            points = torch.zeros((7, 5), dtype=torch.float64)
+            points[:, 3] = torch.tensor(
+                [0., 29.999, 30., 35., 40., 50., 300.],
+                dtype=torch.float64) / 3_600_000.
+            result = model(points)
+            torch.testing.assert_close(
+                result[:, 0],
+                torch.tensor([1., 1., 1., 1.25, 1.5, 2., 2.],
+                             dtype=torch.float64))
+            torch.testing.assert_close(result[:, 1], result[:, 0])
+            torch.testing.assert_close(result[:, 2], result[:, 0])
+
+    def test_linear_blend_manifest_rejects_unsafe_ranges(self):
+        invalid = {
+            "missing": [],
+            "does not contain threshold": [[10., 20.]],
+            "outside shared expert coverage": [[20., 60.]],
+        }
+        for label, ranges in invalid.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as folder:
+                value = blended_two_expert_manifest()
+                value["routing"]["blend_ranges_mm_hr"] = ranges
+                with self.assertRaisesRegex(ValueError, "blend|linear"):
+                    self.load(folder, value)
+
+        with tempfile.TemporaryDirectory() as folder:
+            value = two_expert_manifest()
+            value["routing"]["policy"] = "unknown"
+            with self.assertRaisesRegex(ValueError, "unsupported"):
+                self.load(folder, value)
+
+        with tempfile.TemporaryDirectory() as folder:
+            value = two_expert_manifest()
+            value["routing"]["policy"] = "single_expert_no_blending"
+            model, checkpoint = self.load(folder, value)
+            self.assertEqual(model.routing_policy, "single_expert")
+            self.assertEqual(checkpoint["routing"]["policy"], "single_expert")
+
+    def test_prediction_rejects_projected_blend_before_creating_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            model, checkpoint = self.load(
+                folder, blended_two_expert_manifest())
+            for expert in model.experts.values():
+                expert.uses_external_mass_projection = True
+            output = Path(folder) / "prediction"
+            with self.assertRaisesRegex(ValueError, "cannot blend"):
+                predict(
+                    model, checkpoint, SimpleNamespace(), 40., 3600.,
+                    [0., 3600.], output)
+            self.assertFalse(output.exists())
+
+    def test_summary_csv_identifies_effective_blend_and_primary_expert(self):
+        summary = {
+            "model_id": "low",
+            "routing_label": "low+medium",
+            "routing_policy": "linear_blend",
+            "expert_weights": {"low": .5, "medium": .5},
+            "bundle_id": "approved",
+            "rainfall_mm_hr": 40., "duration_s": 3600.,
+            "frames": [{
+                "time_s": 3600., "csv_file": "frame_000.csv",
+                "file": "frame_000.npz", "depth_tif_file": "depth_000.tif",
+                "max_depth_m": .2, "mean_depth_m": .1,
+                "max_speed_m_s": .01, "mass_projection": "none",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "prediction_summary.csv"
+            _write_summary_csv(path, summary=summary)
+            with path.open(newline="", encoding="utf-8") as stream:
+                row = next(csv.DictReader(stream))
+        self.assertEqual(row["model_id"], "low+medium")
+        self.assertEqual(row["primary_model_id"], "low")
+        self.assertEqual(row["routing_policy"], "linear_blend")
+        self.assertEqual(
+            json.loads(row["expert_weights"]),
+            {"low": .5, "medium": .5})
+
     def test_unapproved_or_escaping_bundle_is_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             rejected = manifest(physics_training_passed=False)
@@ -191,6 +299,23 @@ class ExpertBundleTests(unittest.TestCase):
             value = manifest(audit_file="../overlap_audit.json")
             with self.assertRaisesRegex(ValueError, "escapes"):
                 self.load(folder, value)
+
+    def test_audit_binds_optional_release_profile_and_routing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value = blended_two_expert_manifest(
+                acceptance_profile="idealized_theoretical_v1")
+            audit = self.audit(value)
+            audit["acceptance_profile"] = "different-profile"
+            with self.assertRaisesRegex(ValueError, "acceptance profile"):
+                self.load(folder, value, audit)
+
+        with tempfile.TemporaryDirectory() as folder:
+            value = blended_two_expert_manifest()
+            audit = self.audit(value)
+            audit["routing"] = {
+                "low_max_mm_hr": 40., "policy": "single_expert"}
+            with self.assertRaisesRegex(ValueError, "routing differs"):
+                self.load(folder, value, audit)
 
     def test_checkpoint_sha256_is_required_and_verified_before_loading(self):
         with tempfile.TemporaryDirectory() as folder:

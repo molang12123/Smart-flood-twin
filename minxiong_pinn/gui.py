@@ -155,7 +155,11 @@ class PredictionApp:
         self.progress.configure(maximum=request.frame_count, value=0)
         self._log(f"开始预测：{request.rainfall_mm_hr:g} mm/hr，降雨 {request.rain_duration_s / 3600:g} 小时，{request.frame_count} 帧。")
         if hasattr(self.model, "model_id_for_rainfall"):
-            self._log(f"本次自动选择专家：{self.model.model_id_for_rainfall(request.rainfall_mm_hr)}。")
+            label = (self.model.routing_label_for_rainfall(
+                request.rainfall_mm_hr)
+                if hasattr(self.model, "routing_label_for_rainfall") else
+                self.model.model_id_for_rainfall(request.rainfall_mm_hr))
+            self._log(f"本次自动路由：{label}。")
         if request.simulation_s < request.rain_duration_s:
             self._log("提示：模拟结束时降雨仍在持续。")
         threading.Thread(target=self._predict_worker, args=(request, target), daemon=True).start()
@@ -185,7 +189,8 @@ class PredictionApp:
         self.last_output = target; self.run_button.configure(state="normal"); self.open_button.configure(state="normal")
         peak_depth = max(frame["max_depth_m"] for frame in summary["frames"])
         peak_speed = max(frame["max_speed_m_s"] for frame in summary["frames"])
-        model_id = summary.get("model_id", "single")
+        model_id = summary.get(
+            "routing_label", summary.get("model_id", "single"))
         self._log(f"预测完成（模型 {model_id}）：最大水深 {peak_depth:.4g} m，最大流速 {peak_speed:.4g} m/s")
         self._log(f"结果目录：{target}")
         messagebox.showinfo("预测完成", f"已输出 {len(summary['frames'])} 帧。\n\n结果目录：\n{target}")

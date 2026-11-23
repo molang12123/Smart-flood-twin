@@ -151,6 +151,9 @@ def _load_completed_expert_report(terrain, events, cfg, folder):
 
 def run_expert_config(master, base):
     """Train an already loaded expert configuration relative to ``base``."""
+    if master.get("release_only") is True:
+        raise ValueError(
+            "release-only expert configuration cannot be used for training")
     base = Path(base).resolve()
     resolve = lambda value: (base / value).resolve()
     terrain = MaskedRasterTerrain(resolve(master["terrain_tif"]), manning_n=master["manning_n"])

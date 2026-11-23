@@ -100,6 +100,9 @@ class UnrealFloodService:
             "fallback_active": not bool(self.checkpoint.get("expert_bundle")),
             "fallback_reason": fallback_reason,
             "active_model_domain": self._domain(),
+            "routing": self.checkpoint.get("routing"),
+            "acceptance_profile": self.checkpoint.get(
+                "acceptance_profile"),
             "terrain_active_cells": int(self.terrain.active_count),
         }
 
@@ -187,6 +190,10 @@ class UnrealFloodService:
                     "expert_bundle": bool(self.checkpoint.get("expert_bundle")),
                     "bundle_id": self.checkpoint.get("bundle_id"),
                     "model_id": summary.get("model_id", "single"),
+                    "routing_label": summary.get(
+                        "routing_label", summary.get("model_id", "single")),
+                    "routing_policy": summary.get("routing_policy"),
+                    "expert_weights": summary.get("expert_weights"),
                 },
                 "output_directory": str(target),
                 "files": {"csv": csv_files, "geotiff": tif_files,

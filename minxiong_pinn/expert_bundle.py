@@ -34,6 +34,10 @@ class ExpertBundle(nn.Module):
         self.low_max_mm_hr = float(manifest["routing"]["low_max_mm_hr"])
         medium_max = manifest["routing"].get("medium_max_mm_hr")
         self.medium_max_mm_hr = (None if medium_max is None else float(medium_max))
+        self.routing_policy = manifest["routing"].get("policy", "single_expert")
+        self.blend_ranges_mm_hr = tuple(
+            tuple(map(float, pair))
+            for pair in manifest["routing"].get("blend_ranges_mm_hr", ()))
         self.rainfall_domain = tuple(
             float(value) for value in manifest["training_rain_domain"]["rainfall_mm_hr"])
         first = experts[self.model_ids[0]]
@@ -53,6 +57,54 @@ class ExpertBundle(nn.Module):
             return "medium"
         return "high"
 
+    def expert_weights_for_rainfall(self, rainfall_mm_hr: float) -> dict[str, float]:
+        """Return the deterministic convex routing weights for one condition."""
+        rain = float(rainfall_mm_hr)
+        primary = self.model_id_for_rainfall(rain)
+        weights = {model_id: 0. for model_id in self.model_ids}
+        weights[primary] = 1.
+        if self.routing_policy != "linear_blend":
+            return weights
+        for index, (lower, upper) in enumerate(self.blend_ranges_mm_hr):
+            if lower <= rain <= upper:
+                fraction = min(1., max(0., (rain - lower) / (upper - lower)))
+                weights = {model_id: 0. for model_id in self.model_ids}
+                weights[self.model_ids[index]] = 1. - fraction
+                weights[self.model_ids[index + 1]] = fraction
+                break
+        return weights
+
+    def routing_label_for_rainfall(self, rainfall_mm_hr: float) -> str:
+        """Return a stable user-facing label without changing primary routing."""
+        active = [name for name, weight in
+                  self.expert_weights_for_rainfall(rainfall_mm_hr).items()
+                  if weight > 0.]
+        return active[0] if len(active) == 1 else "+".join(active)
+
+    def _routing_weights(self, rain, tolerance=0.):
+        """Vectorised counterpart of :meth:`expert_weights_for_rainfall`."""
+        weights = rain.new_zeros((len(rain), len(self.model_ids)))
+        if len(self.model_ids) == 2:
+            weights[:, 0] = (
+                rain <= self.low_max_mm_hr + tolerance).to(rain.dtype)
+            weights[:, 1] = 1. - weights[:, 0]
+        else:
+            weights[:, 0] = (
+                rain <= self.low_max_mm_hr + tolerance).to(rain.dtype)
+            weights[:, 1] = ((rain > self.low_max_mm_hr + tolerance) &
+                             (rain <= self.medium_max_mm_hr + tolerance)).to(rain.dtype)
+            weights[:, 2] = (
+                rain > self.medium_max_mm_hr + tolerance).to(rain.dtype)
+        if self.routing_policy == "linear_blend":
+            for index, (lower, upper) in enumerate(self.blend_ranges_mm_hr):
+                inside = ((rain >= lower - tolerance) &
+                          (rain <= upper + tolerance))
+                fraction = ((rain - lower) / (upper - lower)).clamp(0., 1.)
+                weights[inside] = 0.
+                weights[inside, index] = 1. - fraction[inside]
+                weights[inside, index + 1] = fraction[inside]
+        return weights
+
     def forward(self, points):
         if points.ndim != 2 or points.shape[1] != 5:
             raise ValueError("expert bundle expects points shaped (N, 5)")
@@ -67,26 +119,20 @@ class ExpertBundle(nn.Module):
         if torch.any(rain < lo - tolerance) or torch.any(rain > hi + tolerance):
             raise ValueError("rainfall intensity is outside the expert bundle range")
         rain = rain.clamp(min=lo, max=hi)
-        masks = {"low": rain <= self.low_max_mm_hr + tolerance}
-        if len(self.model_ids) == 2:
-            masks["medium"] = rain > self.low_max_mm_hr + tolerance
-        else:
-            masks.update({
-                "medium": ((rain > self.low_max_mm_hr + tolerance) &
-                           (rain <= self.medium_max_mm_hr + tolerance)),
-                "high": rain > self.medium_max_mm_hr + tolerance,
-            })
+        weights = self._routing_weights(rain, tolerance)
         result = None
-        for model_id in self.model_ids:
-            mask = masks[model_id]
+        for index, model_id in enumerate(self.model_ids):
+            mask = weights[:, index] > 0.
             if not torch.any(mask):
                 continue
             values = self.experts[model_id](points[mask])
             if values.ndim != 2 or values.shape != (int(mask.sum()), 3):
                 raise ValueError(f"expert {model_id!r} returned an invalid prediction shape")
             if result is None:
-                result = values.new_empty((len(points), 3))
-            result[mask] = values
+                result = values.new_zeros((len(points), 3))
+            indexes = torch.nonzero(mask, as_tuple=False)[:, 0]
+            weighted = values * weights[mask, index, None].to(values.dtype)
+            result = result.index_add(0, indexes, weighted)
         return points.new_empty((0, 3)) if result is None else result
 
 
@@ -119,6 +165,10 @@ def _manifest(path: Path) -> dict:
         raise ValueError("expert bundle_id must be a nonempty string")
     if not isinstance(value.get("terrain_fingerprint"), str) or not value["terrain_fingerprint"]:
         raise ValueError("expert bundle terrain_fingerprint is missing")
+    acceptance_profile = value.get("acceptance_profile", "strict_physics")
+    if (not isinstance(acceptance_profile, str) or
+            not acceptance_profile.strip()):
+        raise ValueError("expert bundle acceptance_profile must be a nonempty string")
     time_s = float(value.get("time_s", 0))
     if not math.isfinite(time_s) or time_s <= 0:
         raise ValueError("expert bundle time_s must be positive and finite")
@@ -149,10 +199,54 @@ def _manifest(path: Path) -> dict:
             raise ValueError("expert bundle routing thresholds do not cover the rainfall domain")
         normalized_routing = {
             "low_max_mm_hr": low_max, "medium_max_mm_hr": medium_max}
+    policy = routing.get("policy", "single_expert")
+    if policy == "single_expert_no_blending":
+        # Older training configs used this descriptive spelling.  Published
+        # manifests normalise it so routing behaviour remains unambiguous.
+        policy = "single_expert"
+    if policy not in {"single_expert", "linear_blend"}:
+        raise ValueError("expert bundle routing policy is unsupported")
+    blend_ranges = routing.get("blend_ranges_mm_hr", ())
+    if policy == "single_expert":
+        if blend_ranges not in (None, (), []):
+            raise ValueError("single-expert routing cannot declare blend ranges")
+        if "policy" in routing:
+            normalized_routing["policy"] = policy
+    else:
+        if not isinstance(blend_ranges, (list, tuple)) or len(blend_ranges) != len(experts) - 1:
+            raise ValueError("linear-blend routing needs one range per adjacent expert pair")
+        thresholds = ([low_max] if len(experts) == 2 else
+                      [low_max, normalized_routing["medium_max_mm_hr"]])
+        normalized_blends = []
+        previous_upper = None
+        for index, (pair, threshold) in enumerate(zip(blend_ranges, thresholds)):
+            lower, upper = _pair(pair, f"blend range {index}", nonnegative=True)
+            if lower == upper or not lower <= threshold <= upper:
+                raise ValueError("each blend range must be nonempty and contain its routing threshold")
+            if lower < rain_domain[0] or upper > rain_domain[1]:
+                raise ValueError("expert bundle blend range is outside the rainfall domain")
+            if previous_upper is not None and lower < previous_upper:
+                raise ValueError("expert bundle blend ranges must not overlap")
+            left_domain = _pair(
+                experts[index].get("trained_rainfall_mm_hr"),
+                f"{ids[index]} declared rainfall range", nonnegative=True)
+            right_domain = _pair(
+                experts[index + 1].get("trained_rainfall_mm_hr"),
+                f"{ids[index + 1]} declared rainfall range", nonnegative=True)
+            if (left_domain[0] > lower or left_domain[1] < upper or
+                    right_domain[0] > lower or right_domain[1] < upper):
+                raise ValueError("blend range is not covered by both adjacent experts")
+            normalized_blends.append([lower, upper])
+            previous_upper = upper
+        normalized_routing.update({
+            "policy": policy,
+            "blend_ranges_mm_hr": normalized_blends,
+        })
     value["time_s"] = time_s
     value["training_rain_domain"] = {
         "rainfall_mm_hr": list(rain_domain), "duration_s": list(duration_domain)}
     value["routing"] = normalized_routing
+    value["acceptance_profile"] = acceptance_profile
     return value
 
 
@@ -208,6 +302,13 @@ def _audit_evidence(manifest_path, manifest):
                 f"expert bundle audit evidence is not approved: {field} is not true")
     if audit.get("terrain_fingerprint") != manifest["terrain_fingerprint"]:
         raise ValueError("expert bundle audit terrain fingerprint differs from the manifest")
+    if ("acceptance_profile" in audit and
+            audit["acceptance_profile"] != manifest["acceptance_profile"]):
+        raise ValueError(
+            "expert bundle audit acceptance profile differs from the manifest")
+    if "routing" in audit and audit["routing"] != manifest["routing"]:
+        raise ValueError(
+            "expert bundle audit routing differs from the manifest")
     overlap = audit.get("overlap")
     continuous = audit.get("continuous_domain")
     if not isinstance(overlap, dict) or overlap.get("passed") is not True:
@@ -300,6 +401,7 @@ def load_expert_bundle(
         "terrain_fingerprint": manifest["terrain_fingerprint"],
         "training_rain_domain": manifest["training_rain_domain"],
         "routing": manifest["routing"],
+        "acceptance_profile": manifest["acceptance_profile"],
         "expert_domains": {key: list(value) for key, value in checkpoint_domains.items()},
         "activation_approved": True,
         "physics_training_passed": True,

@@ -10,6 +10,8 @@ import torch
 from torch import nn
 
 from minxiong_pinn.overlap_audit import (
+    _overlap_acceptance_thresholds,
+    audit_and_publish,
     build_approved_manifest,
     evaluate_overlap_consistency,
 )
@@ -109,6 +111,50 @@ class OverlapAuditTests(unittest.TestCase):
         result = evaluate_overlap_consistency(experts=experts, **settings)
         self.assertFalse(result["passed"])
         self.assertGreater(result["worst_mass_projection_anchor_relative_error"], .02)
+
+    def test_audit_only_overlap_profile_does_not_change_training_thresholds(self):
+        master = {"training": {"success_thresholds": {
+            "test_mean_pde_loss": .02,
+            "overlap_relative_l2_depth": .1,
+            "overlap_mean_storage_difference": .02,
+        }}}
+        settings = {"acceptance_thresholds": {
+            "overlap_relative_l2_depth": .25,
+        }}
+        result = _overlap_acceptance_thresholds(master, settings)
+        self.assertEqual(result["overlap_relative_l2_depth"], .25)
+        self.assertEqual(result["test_mean_pde_loss"], .02)
+        self.assertEqual(
+            master["training"]["success_thresholds"][
+                "overlap_relative_l2_depth"], .1)
+
+    def test_audit_only_profile_cannot_weaken_individual_physics_gate(self):
+        master = {"training": {"success_thresholds": {
+            "test_mean_pde_loss": .02,
+            "overlap_relative_l2_depth": .1,
+        }}}
+        settings = {"acceptance_thresholds": {
+            "test_mean_pde_loss": .2,
+        }}
+        with self.assertRaisesRegex(ValueError, "non-overlap"):
+            _overlap_acceptance_thresholds(master, settings)
+
+    def test_published_bundle_refuses_before_rewriting_hash_bound_audit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            output = root / "published"
+            output.mkdir()
+            (output / "manifest.json").write_text("{}", encoding="utf-8")
+            audit_path = output / "overlap_audit.json"
+            audit_path.write_bytes(b"immutable-audit-evidence")
+            config = root / "release.json"
+            config.write_text(json.dumps({
+                "output_root": "published",
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(FileExistsError, "already published"):
+                audit_and_publish(config)
+            self.assertEqual(
+                audit_path.read_bytes(), b"immutable-audit-evidence")
 
     def test_manifest_cannot_be_built_from_failed_gate(self):
         master = {

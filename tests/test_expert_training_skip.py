@@ -74,6 +74,10 @@ class CompletedExpertSkipTests(unittest.TestCase):
             self.assertIsNotNone(report)
             self.assertTrue(report["physics_training_passed"])
 
+    def test_release_only_configuration_cannot_start_training(self):
+        with self.assertRaisesRegex(ValueError, "release-only"):
+            expert_training.run_expert_config({"release_only": True}, ".")
+
     def test_resume_disabled_never_skips(self):
         with tempfile.TemporaryDirectory() as root:
             folder = Path(root) / "low"

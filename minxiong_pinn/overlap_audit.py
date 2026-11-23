@@ -21,6 +21,12 @@ from .terrain import MaskedRasterTerrain
 
 
 SUPPORTED_EXPERT_NAMES = ("low", "medium", "high")
+OVERLAP_ACCEPTANCE_KEYS = frozenset({
+    "overlap_mean_storage_difference",
+    "overlap_relative_l2_depth",
+    "overlap_boundary_rms_normal_velocity_m_s",
+    "mass_projection_anchor_relative_error",
+})
 
 
 def _sha256(path):
@@ -279,6 +285,49 @@ def _configured_overlaps(master):
     return result
 
 
+def _overlap_acceptance_thresholds(master, settings):
+    """Return audit-only overlap limits without changing training identity.
+
+    The individual expert reports remain bound to ``training.success_thresholds``.
+    A deployment profile may deliberately use a different *overlap* tolerance,
+    but it may not weaken any individual PDE, boundary, or mass-conservation
+    gate.  Keeping the override under ``overlap_audit`` also means that a
+    release decision cannot make an old optimizer state look resume-compatible
+    with a different training problem.
+    """
+    thresholds = dict(master["training"]["success_thresholds"])
+    overrides = settings.get("acceptance_thresholds", {})
+    if not isinstance(overrides, dict):
+        raise ValueError("overlap acceptance_thresholds must be an object")
+    unknown = set(overrides) - OVERLAP_ACCEPTANCE_KEYS
+    if unknown:
+        names = ", ".join(sorted(map(str, unknown)))
+        raise ValueError(
+            f"overlap acceptance_thresholds contains non-overlap keys: {names}")
+    thresholds.update(overrides)
+    return thresholds
+
+
+def _release_routing(master):
+    """Return the routing fields that are hash-bound into release evidence."""
+    names = _expert_names(master)
+    source = master["routing"]
+    result = {"low_max_mm_hr": float(source["low_max_mm_hr"])}
+    if len(names) == 3:
+        result["medium_max_mm_hr"] = float(source["medium_max_mm_hr"])
+    policy = source.get("policy")
+    if policy == "single_expert_no_blending":
+        policy = "single_expert"
+    if policy is not None:
+        result["policy"] = policy
+    if "blend_ranges_mm_hr" in source:
+        result["blend_ranges_mm_hr"] = [
+            [float(value) for value in pair]
+            for pair in source["blend_ranges_mm_hr"]
+        ]
+    return result
+
+
 def build_approved_manifest(master, terrain, checkpoints, audit_report, output_root):
     """Build an activation manifest only after every deployment gate passes."""
     names = _expert_names(master)
@@ -335,13 +384,10 @@ def build_approved_manifest(master, terrain, checkpoints, audit_report, output_r
         raise ValueError(f"cannot read saved expert audit evidence: {exc}") from exc
     if saved_audit != audit_report:
         raise ValueError("saved expert audit evidence differs from the approved audit")
-    routing = master["routing"]
-    manifest_routing = {
-        "low_max_mm_hr": float(routing["low_max_mm_hr"]),
-    }
-    if len(names) == 3:
-        manifest_routing["medium_max_mm_hr"] = float(
-            routing["medium_max_mm_hr"])
+    manifest_routing = _release_routing(master)
+    if ("routing" in audit_report and
+            audit_report["routing"] != manifest_routing):
+        raise ValueError("saved expert audit routing differs from release routing")
     manifest = {
         "schema_version": 1,
         "bundle_id": f"minxiong-{output_root.name}",
@@ -356,6 +402,8 @@ def build_approved_manifest(master, terrain, checkpoints, audit_report, output_r
             "duration_s": [duration_min, duration_max],
         },
         "routing": manifest_routing,
+        "acceptance_profile": audit_report.get(
+            "acceptance_profile", "strict_physics"),
         "audit_file": "overlap_audit.json",
         "audit_sha256": _sha256(audit_path),
         "experts": experts,
@@ -372,6 +420,12 @@ def audit_and_publish(config_path, *, model_loader=load_model):
     output_root = resolve(master["output_root"])
     if not output_root.is_dir():
         raise FileNotFoundError(f"expert output directory does not exist: {output_root}")
+    manifest_path = output_root / "manifest.json"
+    if manifest_path.exists():
+        # Refuse before rewriting overlap_audit.json: that file is hash-bound
+        # by an existing manifest and must remain immutable.
+        raise FileExistsError(
+            f"refusing to modify an already published bundle: {manifest_path}")
     terrain = MaskedRasterTerrain(resolve(master["terrain_tif"]),
                                   manning_n=master["manning_n"])
     names = _expert_names(master)
@@ -391,13 +445,14 @@ def audit_and_publish(config_path, *, model_loader=load_model):
             "completed_steps": report.get("completed_steps"),
             "best_validation_loss": report.get("best_validation_loss"),
             "checkpoint_sha256": _sha256(folder / "model.pt"),
-            "report": str(report_path),
+            "report": report_path.relative_to(output_root).as_posix(),
         })
 
     settings = master.get("overlap_audit", {})
+    overlap_thresholds = _overlap_acceptance_thresholds(master, settings)
     overlap = evaluate_overlap_consistency(
         experts, terrain, _configured_overlaps(master), master["durations_hr"],
-        master["training"]["time_end_s"], master["training"]["success_thresholds"],
+        master["training"]["time_end_s"], overlap_thresholds,
         spatial_samples=settings.get("spatial_samples", 4096),
         boundary_samples=settings.get("boundary_samples", 1024),
         batch_size=settings.get("batch_size", 8192),
@@ -417,6 +472,11 @@ def audit_and_publish(config_path, *, model_loader=load_model):
         "activation_approved": bool(
             all_individual and overlap["passed"] and continuous_passed),
         "terrain_fingerprint": terrain.fingerprint,
+        "acceptance_profile": settings.get(
+            "acceptance_profile", "strict_physics"),
+        "routing_policy": master.get("routing", {}).get(
+            "policy", "single_expert_no_blending"),
+        "routing": _release_routing(master),
         "experts": individual,
         "overlap": overlap,
     }
@@ -426,9 +486,6 @@ def audit_and_publish(config_path, *, model_loader=load_model):
     audit_path.write_text(json.dumps(audit_report, ensure_ascii=False, indent=2),
                           encoding="utf-8")
     if audit_report["activation_approved"]:
-        manifest_path = output_root / "manifest.json"
-        if manifest_path.exists():
-            raise FileExistsError(f"refusing to overwrite existing manifest: {manifest_path}")
         manifest = build_approved_manifest(master, terrain, checkpoints,
                                            audit_report, output_root)
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),

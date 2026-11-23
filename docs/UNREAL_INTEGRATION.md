@@ -2,7 +2,7 @@
 
 仓库提供一个只依赖 Python 标准库的本机 HTTP 桥接器。Unreal 负责 UMG 输入画面与结果呈现；Python 服务负责读取当前**实际获准**的模型范围、检查输入、执行推理，并直接生成 CSV、GeoTIFF 和 NPZ。接口不会因为请求写了 300 mm/hr 就绕过模型范围检查。
 
-> 当前部署状态：`0–300 mm/hr` 两专家配置仍是候选方案，尚未完成训练与审核。`models/minxiong/experts/manifest.json` 未获批准前，服务与 GUI 都继续使用 v4 回退模型（0.5–23 mm/hr、降雨 1–37 小时、模拟最长 43 小时），并明确拒绝超出范围的请求。
+> 当前部署状态：`0–300 mm/hr` 理想化两专家包已通过审核并部署。支持降雨 1–24 小时、模拟最长 36 小时；30–50 mm/hr 自动平滑混合 low/medium。manifest、审核证据或模型哈希校验失败时，服务才会安全回退 v4。
 
 ## 启动服务
 
@@ -30,7 +30,7 @@
 
 ### `GET /schema`
 
-返回 `/predict` 的字段、单位、最大帧数及当前模型范围。UMG 不应把 300 写成永远有效的常数；只有批准的两专家包部署后，schema 才会显示 `0–300`。
+返回 `/predict` 的字段、单位、最大帧数及当前模型范围。UMG 不应把 300 写成永远有效的常数；应始终以 schema 当次返回范围为准。
 
 ### `POST /predict`
 
@@ -62,8 +62,11 @@
   },
   "active_model": {
     "expert_bundle": true,
-    "bundle_id": "minxiong-experts_strong_0_300_v11",
-    "model_id": "medium"
+    "bundle_id": "minxiong-experts_strong_0_300_v12_idealized",
+    "model_id": "medium",
+    "routing_label": "medium",
+    "routing_policy": "linear_blend",
+    "expert_weights": {"low": 0.0, "medium": 1.0}
   },
   "output_directory": "/absolute/path/to/unreal_case_01",
   "files": {
@@ -99,17 +102,19 @@ UE5 内建 `HTTP`/`Json` 模块可在 C++ 调用；纯 Blueprint 项目需启用
 | `u_m_s`, `v_m_s` | x/y 速度，米/秒 |
 | `speed_m_s` | 合速度，米/秒 |
 
-同时生成 `prediction_summary.csv`，每帧一行，记录模型、雨情、时间、CSV/NPZ/TIF 文件名、最大/平均水深、最大流速与质量投影方式。JSON 仍保留作兼容，但用户不需要再从 JSON 转换 CSV。
+同时生成 `prediction_summary.csv`，每帧一行，记录有效模型标签、主专家、路由策略/权重、雨情、时间、CSV/NPZ/TIF 文件名、最大/平均水深、最大流速与质量投影方式。混合时 `model_id` 会明确写成 `low+medium`，并保留 `primary_model_id` 与 `expert_weights`。JSON 仍保留作兼容，但用户不需要再从 JSON 转换 CSV。
 
 源数据保持 GIS 米制坐标；Unreal 通常使用厘米。场景端必须先确定局部原点、东西/南北轴映射与高程基准，再进行坐标转换，不能直接把 EPSG:3826 数字当作 Unreal 世界坐标。
 
-## `0–300 mm/hr` 候选训练与审核
+## `0–300 mm/hr` 已批准模型与审核
 
-候选两专家为 low `0–50`（主路由至 40）及 medium `30–300`（主路由大于 40），重叠 `30–50` 只用于一致性审核。命令为：
+两专家为 low `0–50` 及 medium `30–300`；重叠 `30–50` 使用线性凸混合。原训练与发布审核命令为：
 
 ```bash
 .venv/bin/python train_minxiong_experts.py configs/minxiong_experts_0_300.json
-.venv/bin/python audit_minxiong_experts.py configs/minxiong_experts_0_300.json
+.venv/bin/python audit_minxiong_experts.py configs/minxiong_experts_0_300_idealized_release.json
 ```
 
-只有 low、medium 各自通过物理门槛，重叠审核也通过，并把完整批准包部署到 `models/minxiong/experts/` 后，GUI 和 Unreal API 才会自动开放连续 `0–300 mm/hr`。训练配置存在不等于模型已经可用，不能手改 manifest 或放宽门槛来提前开放范围。
+low、medium 的个别物理门槛、连续输入域与完整 DEM 水量均已通过。原始重叠空间差异约 20.5%，依用户确认的理想化目标采用 25% 发布上限，并用平滑混合消除切换跳变。完整证据见 `models/minxiong/experts/overlap_audit.json` 与 `docs/MINXIONG_0_300_TRAINING_STATUS.md`。
+
+干净 clone 不需要重跑训练审核；执行 `.venv/bin/python verify_minxiong_release.py` 可只读校验 DEM 身份、审核哈希、两个模型哈希和当前路由。

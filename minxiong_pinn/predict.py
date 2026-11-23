@@ -15,9 +15,10 @@ FRAME_CSV_FIELDS = (
     "speed_m_s",
 )
 SUMMARY_CSV_FIELDS = (
-    "model_id", "bundle_id", "rainfall_mm_hr", "duration_s", "time_s", "file",
-    "npz_file", "depth_tif_file", "max_depth_m", "mean_depth_m", "max_speed_m_s",
-    "mass_projection",
+    "model_id", "primary_model_id", "bundle_id", "routing_policy",
+    "expert_weights", "rainfall_mm_hr", "duration_s", "time_s", "file",
+    "npz_file", "depth_tif_file", "max_depth_m", "mean_depth_m",
+    "max_speed_m_s", "mass_projection",
 )
 
 
@@ -48,8 +49,15 @@ def _write_summary_csv(path, *, summary):
         writer.writeheader()
         for frame in summary["frames"]:
             writer.writerow({
-                "model_id": summary["model_id"],
+                "model_id": summary.get(
+                    "routing_label", summary["model_id"]),
+                "primary_model_id": summary["model_id"],
                 "bundle_id": summary.get("bundle_id", ""),
+                "routing_policy": summary.get("routing_policy", ""),
+                "expert_weights": (
+                    json.dumps(summary["expert_weights"], sort_keys=True,
+                               separators=(",", ":"))
+                    if "expert_weights" in summary else ""),
                 "rainfall_mm_hr": summary["rainfall_mm_hr"],
                 "duration_s": summary["duration_s"],
                 "time_s": frame["time_s"],
@@ -128,23 +136,38 @@ def predict(model, checkpoint, terrain, rainfall_mm_hr, duration_s, times_s, out
         raise ValueError("rain duration is outside the trained event range")
     if any(not np.isfinite(t) or t < 0 or t > model.scales["time_s"] for t in times_s):
         raise ValueError("prediction time is outside the trained model horizon")
-    output = Path(output_dir); output.mkdir(parents=True, exist_ok=False)
-    xy = terrain.sample_points(np.random.default_rng(0), terrain.active_count, jitter=False)
-    # sample_points uses replacement; use exact raster order for complete output.
-    west, _, _, north = terrain.bounds
-    xy[:, 0] = west + (terrain.active_cols + .5) * terrain.dx
-    xy[:, 1] = north - (terrain.active_rows + .5) * terrain.dy
     model_id = (model.model_id_for_rainfall(rainfall_mm_hr)
                 if hasattr(model, "model_id_for_rainfall")
                 else checkpoint.get("model_id", "single"))
     summary = {"rainfall_mm_hr": rainfall_mm_hr, "duration_s": duration_s,
                "times_s": list(map(float, times_s)), "model_id": model_id,
                "frames": []}
+    expert_weights = None
+    if hasattr(model, "expert_weights_for_rainfall"):
+        expert_weights = model.expert_weights_for_rainfall(rainfall_mm_hr)
+        summary["expert_weights"] = expert_weights
+        summary["routing_policy"] = getattr(
+            model, "routing_policy", "single_expert")
+        summary["routing_label"] = model.routing_label_for_rainfall(
+            rainfall_mm_hr)
     if checkpoint.get("bundle_id"):
         summary["bundle_id"] = checkpoint["bundle_id"]
     prediction_model = model
     if hasattr(model, "experts") and model_id in model.experts:
         prediction_model = model.experts[model_id]
+    active_blend = ([name for name, weight in expert_weights.items() if weight > 0.]
+                    if expert_weights is not None else [])
+    if len(active_blend) > 1 and any(
+            getattr(model.experts[name], "uses_external_mass_projection", False)
+            for name in active_blend):
+        raise ValueError(
+            "full-domain prediction cannot blend externally projected experts")
+    output = Path(output_dir); output.mkdir(parents=True, exist_ok=False)
+    xy = terrain.sample_points(np.random.default_rng(0), terrain.active_count, jitter=False)
+    # sample_points uses replacement; use exact raster order for complete output.
+    west, _, _, north = terrain.bounds
+    xy[:, 0] = west + (terrain.active_cols + .5) * terrain.dx
+    xy[:, 1] = north - (terrain.active_rows + .5) * terrain.dy
     for index, t in enumerate(times_s):
         result = np.empty((terrain.active_count, 3), dtype=np.float32)
         factor_mean = None

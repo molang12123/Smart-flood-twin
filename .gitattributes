@@ -1,2 +1,7 @@
 # Preserve CSV bytes because metadata/checkpoints include SHA-256 hashes.
 *.csv -text whitespace=cr-at-eol
+# Approved bundles hash these exact bytes; Windows checkout must not rewrite
+# line endings or attempt text conversion.
+models/minxiong/experts/*.json -text
+models/minxiong/experts/**/*.json -text
+models/minxiong/experts/**/*.pt -text

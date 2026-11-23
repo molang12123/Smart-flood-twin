@@ -1,10 +1,10 @@
 # Smart-flood-twin
 
-民雄固定 DEM 参数化 PINN 已提供 VS Code 图形输入界面，可直接填写雨势、降雨时长、模拟时长和输出间隔，不必修改 JSON；也提供 Unreal Engine 可调用的本机 HTTP 桥接器。请先阅读 [民雄 VS Code 使用指南](docs/MINXIONG_VSCODE_GUIDE.md)与 [Unreal Engine 对接指南](docs/UNREAL_INTEGRATION.md)，训练成果见 [自包含 HTML 报告](reports/minxiong_training_results.html)。
+民雄固定 DEM 参数化 PINN 已提供 VS Code 图形输入界面，可直接填写雨势、降雨时长、模拟时长和输出间隔，不必修改 JSON；也提供 Unreal Engine 可调用的本机 HTTP 桥接器。请先阅读 [民雄 VS Code 使用指南](docs/MINXIONG_VSCODE_GUIDE.md)与 [Unreal Engine 对接指南](docs/UNREAL_INTEGRATION.md)，当前两专家训练与审核成果见 [0–300 发布状态](docs/MINXIONG_0_300_TRAINING_STATUS.md)。
 
 固定地形、多降雨情境的二维浅水方程参数化 PINN。范围包含模型、训练/验证、独立 Python 推理、CSV/GeoTIFF 数据交接及本机 HTTP 接口；不包含 QGIS 制图、Unreal 材质、水面网格或已完成的真实 UE 场景联调。
 
-**当前是可运行的研究原型，不是已验证的民雄预测模型。** 合成小案例的读入→训练→保存→新进程推理→时序/流量/水量导出已运行；短训练的误差和水量门槛尚未通过，默认生产推理会拒绝无验证证据的模型。真实 DEM、粗糙度/初边界、可信参考、雨情范围和精度/性能预算仍待团队提供。
+**当前是已通过理论约束审核的可运行研究模型，不是真实淹水精度认证。** 固定 DEM、连续条件、完整 DEM 水量、两专家重叠与 CSV 输出均已实跑；尚未以排水、入渗、建筑、河川边界或实测积水校准。因此结果适合当前目标的理想化淹水展示，不应作为防灾决策或真实水深保证。
 
 ## 在 VS Code 中运行（Windows 也适用）
 
@@ -15,7 +15,7 @@
 
 民雄入口固定读取 `data/minxiong/裁剪后民雄.tif`。有效格由 GeoTIFF 掩膜决定，不会用“高程小于或等于 0”判断 NoData，所以含负高程的洼地仍是有效地形。随机性只用于训练采样，不会随机生成或改变 DEM。
 
-GUI 与 Unreal API 都读取实际已批准模型的范围。仓库当前正式回退模型仍是 v4（0.5–23 mm/hr、降雨 1–37 小时、模拟最长 43 小时）。新的候选方案以 low/medium 两专家覆盖 0–300 mm/hr、降雨 1–24 小时、模拟最长 36 小时；只有两个专家各自通过物理门槛且 30–50 mm/hr 重叠区审核通过后才会启用。未批准、文件缺失或审核失败时仍会使用 v4，不会把实验权重冒充正式模型。详细操作见[民雄 VS Code 使用指南](docs/MINXIONG_VSCODE_GUIDE.md)。
+GUI 与 Unreal API 都读取实际已批准模型的范围。当前 low/medium 两专家包已部署，覆盖连续 0–300 mm/hr、降雨 1–24 小时、模拟最长 36 小时；30–50 mm/hr 自动线性混合。若 manifest、审核证据、模型哈希或 DEM 不一致，才会安全回退 v4（0.5–23 mm/hr）。详细操作见[民雄 VS Code 使用指南](docs/MINXIONG_VSCODE_GUIDE.md)。
 
 原来的 **PINN：固定地形、手动雨情与训练报告** 是 synthetic 开发演示，仍可用于检查通用流程，但不是民雄日常预测入口。本实例实际验证环境为 Linux，尚未宣称在原生 Windows 实机完成训练性能验证。
 
@@ -35,11 +35,11 @@ MPLCONFIGDIR=/tmp/flood-pinn-mpl XDG_CACHE_HOME=/tmp/flood-pinn-cache .venv/bin/
 
 ## 0–300 mm/hr 两专家训练与验收
 
-当前候选配置把雨势拆成 low（训练 0–50、主路由至 40）和 medium（训练 30–300、主路由大于 40 mm/hr）两个专家；降雨时长为 1–24 小时，物理时域为 36 小时。配置在 `configs/minxiong_experts_0_300.json`。配置、路由和测试已经存在，但两个专家尚未完成训练与审核，所以 0–300 是目标范围，不是当前已部署能力。历史 0–800 v9 low 的失败证据仍保存在 `outputs/minxiong/experts_wb_0_800_v9/low/`，不会被候选配置改写。
+正式配置把雨势拆成 low（训练 0–50）和 medium（训练 30–300 mm/hr）两个专家；降雨时长为 1–24 小时，物理时域为 36 小时。两者均已完成训练，连续域与完整 DEM 水量审核通过。依照理想化展示目标，原始重叠空间差异采用 25% 上限，并在 30–50 mm/hr 做凸混合以消除硬切换；实际最差为 20.4941%。历史 0–800 v9 失败证据仍保留，不属于已部署能力。
 
 ```bash
 .venv/bin/python train_minxiong_experts.py configs/minxiong_experts_0_300.json
-.venv/bin/python audit_minxiong_experts.py configs/minxiong_experts_0_300.json
+.venv/bin/python audit_minxiong_experts.py configs/minxiong_experts_0_300_idealized_release.json
 ```
 
 v10 诊断短跑（研究输出，不能部署）：
@@ -49,9 +49,11 @@ v10 诊断短跑（研究输出，不能部署）：
 .venv/bin/python probe_minxiong_low.py hydro90
 ```
 
-训练每 50 步原子保存 `training_state.pt`，可恢复模型、优化器、最佳权重、历史、NumPy/Torch 随机状态和累计时间；地形、事件或关键配置不一致时会拒绝误续训。审核只有在两个专家的 PDE、连续方程、封闭边界法向速度和水量门槛，以及 30–50 mm/hr 重叠区一致性全部通过后，才生成批准用 `manifest.json`。
+训练每 50 步原子保存 `training_state.pt`，可恢复模型、优化器、最佳权重、历史、NumPy/Torch 随机状态和累计时间；地形、事件或关键配置不一致时会拒绝误续训。发布配置标记为 `release_only`，训练入口会拒绝误用。批准 manifest、审核证据及两个 checkpoint 已部署到 `models/minxiong/experts/`。
 
-发布时必须把审核通过的整个专家包（`manifest.json`、`low/`、`medium/` 检查点及审核证据）一起部署到 `models/minxiong/experts/`；不能只复制 manifest。若任何门槛失败，应保留失败报告并继续使用 v4。
+加载时会同时校验整个专家包（`manifest.json`、`low/`、`medium/` 检查点及审核证据），不能只复制 manifest；任何校验失败都会回退 v4。
+
+从 GitHub clone 后可执行 `.venv/bin/python verify_minxiong_release.py`，只读验证 DEM、模型哈希、审核证据与路由，不会重新训练或改写发布文件。
 
 ## Unreal Engine 接口与 CSV 直出
 
@@ -109,6 +111,6 @@ summary = result.finalize()  # 消费前调用只返回pending
 - 瞬时单位宽流量m²/s、面流量m³/s和区间体积m³严格区分；共享面相消不等于PINN储水严格守恒，余差照实保留。
 - 当前实现完整规则矩形网格、明确干初始和四壁条件。真实开放边界、初始积水、乡界掩膜/内部障碍尚未实现，相关配置会报错；不能当成民雄已适用。
 - 未包含建筑阻水、入渗、地下排水、源追踪；原FV仍仅用于Case A回归，不是民雄全域可信参考。
-- 候选专家训练已支持 optimizer、最佳权重、历史、NumPy/Torch RNG 与累计时间的精确断点恢复；通用 GPU 性能验证和真实 UE 场景联调仍未完成。普通推理 checkpoint 与 `training_state.pt` 用途不同，不能相互替代。
+- 专家训练已支持 optimizer、最佳权重、历史、NumPy/Torch RNG 与累计时间的精确断点恢复；通用 GPU 性能验证和真实 UE 场景联调仍未完成。普通推理 checkpoint 与 `training_state.pt` 用途不同，不能相互替代。
 
 详见[实现与验证状态](docs/IMPLEMENTATION_STATUS.md)、[团队接口](docs/TEAM_INTERFACE.md)、[FV验证证据](docs/reference_validation.md)、[批准的设计](docs/design_v0.2.md)。
